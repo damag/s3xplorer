@@ -385,7 +385,9 @@ class MainWindow(QMainWindow):
             None,
             None
         )
-        worker = ListObjectsWorker(self.aws_client, bucket_name)
+        # Set recursive=False to only load the root level initially
+        # This is much faster for large buckets and allows user to browse on demand
+        worker = ListObjectsWorker(self.aws_client, bucket_name, recursive=False)
         
         # Connect signals
         worker.signals.data.connect(self.handle_objects_data)
@@ -493,6 +495,11 @@ class MainWindow(QMainWindow):
             else:
                 # Update files list with files in the selected directory
                 self.update_files_list(item_path)
+                
+                # Check if we need to load more objects for this directory
+                # This is useful for deep hierarchies in large buckets
+                if item_path and self.aws_client and self.current_bucket:
+                    self.load_directory_contents(item_path)
     
     def update_files_list(self, directory_path):
         """Update files list with files in the selected directory."""
@@ -1037,3 +1044,74 @@ class MainWindow(QMainWindow):
         
         self.worker_manager.start_worker(worker, operation_id)
         self.status_bar.showMessage("Deleting object...")
+
+    def load_directory_contents(self, prefix):
+        """Load directory contents for the specific prefix for better browsing of deep hierarchies."""
+        # Only load if we already have the bucket selected
+        if not self.aws_client or not self.current_bucket:
+            return
+            
+        # Create and start the worker to load just this directory
+        operation_id = self.operations_window.add_operation(
+            "List Directory", 
+            f"Loading directory: {prefix}",
+            None,
+            None
+        )
+        # Use non-recursive mode but with the specific prefix
+        worker = ListObjectsWorker(self.aws_client, self.current_bucket, prefix, recursive=False)
+        
+        # Connect signals
+        worker.signals.data.connect(self.handle_directory_contents)
+        worker.signals.error.connect(self.handle_worker_error)
+        worker.signals.progress.connect(self.handle_worker_progress)
+        
+        self.worker_manager.start_worker(worker, operation_id)
+        self.status_bar.showMessage(f"Loading directory: {prefix}...")
+    
+    def handle_directory_contents(self, objects_data):
+        """Handle directory contents data from focused directory listing."""
+        # Convert from API response format to UI expected format
+        objects = []
+        
+        # Process regular objects
+        for obj in objects_data.get('objects', []):
+            objects.append({
+                'Key': obj.get('key', ''),
+                'Size': obj.get('size', 0),
+                'LastModified': datetime.fromisoformat(obj.get('last_modified')) if obj.get('last_modified') else datetime.now(),
+                'ETag': obj.get('etag', ''),
+                'StorageClass': obj.get('storage_class', 'STANDARD'),
+                'IsDirectory': obj.get('is_directory', False)
+            })
+        
+        # Process directory prefixes
+        for prefix in objects_data.get('prefixes', []):
+            # Add a directory marker object for each prefix
+            prefix_key = prefix.get('prefix', '')
+            if prefix_key:
+                objects.append({
+                    'Key': prefix_key,  # This ends with '/' by design
+                    'Size': 0,
+                    'LastModified': datetime.now(),
+                    'ETag': '',
+                    'StorageClass': 'DIRECTORY',
+                    'IsDirectory': True
+                })
+        
+        # Add these objects to our existing objects
+        for obj in objects:
+            if obj not in self.current_objects:
+                self.current_objects.append(obj)
+        
+        # Update the files list for the current directory
+        current_prefix = self.files_header.text().strip("/")
+        if current_prefix:
+            current_prefix += "/"
+        self.update_files_list(current_prefix)
+        
+        # Complete the operation
+        for operation_id, operation in self.operations_window.operations.items():
+            if operation['type'] == "List Directory":
+                self.operations_window.complete_operation(operation_id)
+                break
