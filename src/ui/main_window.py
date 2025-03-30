@@ -399,6 +399,8 @@ class MainWindow(QMainWindow):
         """Handle the objects data from the worker."""
         # Convert from API response format to UI expected format
         objects = []
+        
+        # Process regular objects
         for obj in objects_data.get('objects', []):
             objects.append({
                 'Key': obj.get('key', ''),
@@ -408,6 +410,20 @@ class MainWindow(QMainWindow):
                 'StorageClass': obj.get('storage_class', 'STANDARD'),
                 'IsDirectory': obj.get('is_directory', False)
             })
+        
+        # Process directory prefixes
+        for prefix in objects_data.get('prefixes', []):
+            # Add a directory marker object for each prefix
+            prefix_key = prefix.get('prefix', '')
+            if prefix_key:
+                objects.append({
+                    'Key': prefix_key,  # This ends with '/' by design
+                    'Size': 0,
+                    'LastModified': datetime.now(),
+                    'ETag': '',
+                    'StorageClass': 'DIRECTORY',
+                    'IsDirectory': True
+                })
         
         # Store all objects for reference
         self.current_objects = objects
@@ -427,7 +443,9 @@ class MainWindow(QMainWindow):
             if "/" not in obj["Key"]:  # Files in the root directory
                 self._add_file_to_table(obj)
         
-        self.status_bar.showMessage(f"Found {len(objects)} objects in {self.current_bucket}")
+        # Count just the non-directory objects for display
+        actual_objects = [obj for obj in objects if not obj.get('IsDirectory', False)]
+        self.status_bar.showMessage(f"Found {len(actual_objects)} objects in {self.current_bucket}")
         
         # Complete the List Objects operation
         for operation_id, operation in self.operations_window.operations.items():
