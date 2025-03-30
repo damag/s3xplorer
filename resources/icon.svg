@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+    <!-- Background -->
+    <rect width="256" height="256" fill="#232F3E"/>
+    
+    <!-- S3 Bucket -->
+    <path d="M48 64 L208 64 L208 192 L48 192 Z" fill="#FF9900" stroke="#232F3E" stroke-width="8"/>
+    
+    <!-- Folder Structure -->
+    <rect x="64" y="96" width="32" height="32" fill="#232F3E"/>
+    <rect x="96" y="96" width="32" height="32" fill="#232F3E"/>
+    <rect x="128" y="96" width="32" height="32" fill="#232F3E"/>
+    
+    <rect x="64" y="128" width="32" height="32" fill="#232F3E"/>
+    <rect x="96" y="128" width="32" height="32" fill="#232F3E"/>
+    <rect x="128" y="128" width="32" height="32" fill="#232F3E"/>
+    
+    <!-- AWS Logo -->
+    <path d="M160 96 L192 96 L192 160 L160 160 Z" fill="#FF9900"/>
+    <path d="M160 96 L176 112 L192 96" stroke="#232F3E" stroke-width="4" fill="none"/>
+</svg> 
