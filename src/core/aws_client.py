@@ -483,7 +483,7 @@ class AWSClient(QObject):
                     operation="list_buckets"
                 )
     
-    def list_objects(self, bucket: str, prefix: str = '', delimiter: str = '/', recursive: bool = False) -> Dict[str, Any]:
+    def list_objects(self, bucket: str, prefix: str = '', delimiter: str = '/', recursive: bool = False, max_objects: int = 10000) -> Dict[str, Any]:
         """
         List objects in an S3 bucket with pagination support.
         
@@ -492,6 +492,7 @@ class AWSClient(QObject):
             prefix: Prefix filter for objects
             delimiter: Delimiter for grouping (use '/' for directory-like hierarchy)
             recursive: If True, will recursively list all objects including in subdirectories
+            max_objects: Maximum number of objects to return (prevents overloading with large buckets)
         
         Returns:
             Dict with 'objects', 'prefixes', 'bucket', and 'current_prefix'
@@ -521,6 +522,7 @@ class AWSClient(QObject):
             # Handle pagination
             continuation_token = None
             page_count = 0
+            total_objects = 0
             
             while True:
                 page_count += 1
@@ -538,6 +540,11 @@ class AWSClient(QObject):
                 
                 # Process objects
                 for obj in response.get('Contents', []):
+                    # Check if we've reached the max objects limit
+                    if total_objects >= max_objects:
+                        logger.info(f"Reached maximum objects limit ({max_objects})")
+                        break
+                    
                     all_objects.append({
                         'key': obj.get('Key', ''),
                         'size': obj.get('Size', 0),
@@ -546,6 +553,7 @@ class AWSClient(QObject):
                         'storage_class': obj.get('StorageClass', 'STANDARD'),
                         'is_directory': obj.get('Key', '').endswith('/')
                     })
+                    total_objects += 1
                 
                 # Process prefixes (directories)
                 if not recursive:  # Only process prefixes in non-recursive mode
@@ -558,12 +566,41 @@ class AWSClient(QObject):
                                 'name': prefix_value.rstrip('/').split('/')[-1] if '/' in prefix_value else prefix_value.rstrip('/')
                             })
                 
+                # Check if we need to stop due to max objects limit
+                if total_objects >= max_objects:
+                    break
+                
                 # Check if there are more pages
                 if not response.get('IsTruncated', False) or page_count >= self.max_pages:
                     break
                 
                 # Get the continuation token for the next page
                 continuation_token = response.get('NextContinuationToken')
+            
+            # When in recursive mode, we need to extract directory structure from object keys
+            if recursive:
+                # Build a set of all unique directory paths
+                directory_paths = set()
+                for obj in all_objects:
+                    key = obj['key']
+                    path_parts = key.split('/')
+                    
+                    # Skip files in the root directory
+                    if len(path_parts) <= 1:
+                        continue
+                    
+                    # Add each directory level
+                    for i in range(len(path_parts) - 1):
+                        if path_parts[i]:  # Skip empty parts
+                            dir_path = '/'.join(path_parts[:i+1]) + '/'
+                            directory_paths.add(dir_path)
+                
+                # Convert directory paths to prefix objects
+                for dir_path in directory_paths:
+                    all_prefixes.append({
+                        'prefix': dir_path,
+                        'name': dir_path.rstrip('/').split('/')[-1]
+                    })
             
             logger.info(f"Found {len(all_objects)} objects and {len(all_prefixes)} directories")
             
