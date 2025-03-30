@@ -93,6 +93,18 @@ class AWSClient(QObject):
         """Print debug message if verbose mode is enabled."""
         logger.debug(message)
     
+    def format_size(self, size_bytes):
+        """Format size in bytes to human readable string."""
+        if size_bytes is None:
+            return ""
+            
+        size_bytes = float(size_bytes)
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f} TB"
+    
     def get_account_info(self) -> dict:
         """Get AWS account information."""
         try:
@@ -633,7 +645,7 @@ class AWSClient(QObject):
             bucket: S3 bucket name
             key: S3 object key
             extra_args: Additional arguments for the upload (content type, metadata, etc.)
-            progress_callback: Callback for progress updates, returns False to cancel
+            progress_callback: Callback for progress updates, receives bytes transferred, returns False to cancel
             
         Returns:
             bool: Success or failure
@@ -647,7 +659,7 @@ class AWSClient(QObject):
                 )
             
             file_size = os.path.getsize(file_path)
-            logger.info(f"Uploading file '{file_path}' ({file_size} bytes) to {bucket}/{key}")
+            logger.info(f"Uploading file '{file_path}' ({self.format_size(file_size)}) to {bucket}/{key}")
             
             # Create a transfer config for multipart uploads
             config = boto3.s3.transfer.TransferConfig(
@@ -657,34 +669,10 @@ class AWSClient(QObject):
                 use_threads=True
             )
             
-            # Set up callback handler for progress
-            class ProgressCallback:
-                def __init__(self, callback_func):
-                    self.callback_func = callback_func
-                    self.total_size = file_size
-                    self.uploaded = 0
-                    self.last_percent = 0
-                
-                def __call__(self, bytes_amount):
-                    self.uploaded += bytes_amount
-                    percent = int(min(100, self.uploaded * 100 / self.total_size))
-                    
-                    # Only call the callback if progress has changed by at least 1%
-                    if percent > self.last_percent:
-                        self.last_percent = percent
-                        # If callback exists and returns False, cancel the upload
-                        if self.callback_func and not self.callback_func(percent):
-                            return False
-                    
-                    return True
-            
-            progress_tracker = ProgressCallback(progress_callback) if progress_callback else None
-            callback_kwargs = {'Callback': progress_tracker} if progress_tracker else {}
-            
-            # Extra args for the upload
+            # Pass the progress_callback directly - it now receives bytes transferred
+            callback_kwargs = {'Callback': progress_callback} if progress_callback else {}
             upload_args = extra_args or {}
             
-            # Execute the upload with automatic multipart handling
             self.s3_client.upload_file(
                 file_path, 
                 bucket, 
@@ -728,7 +716,7 @@ class AWSClient(QObject):
             bucket: S3 bucket name
             key: S3 object key
             save_path: Local path to save the file
-            progress_callback: Callback for progress updates, returns False to cancel
+            progress_callback: Callback for progress updates, receives bytes transferred, returns False to cancel
             
         Returns:
             bool: Success or failure
@@ -740,14 +728,14 @@ class AWSClient(QObject):
             self._download_stop.clear()
             
             # Get object metadata to determine size
+            logger.info(f"Getting metadata for {bucket}/{key}")
             metadata = self._execute_with_retry(
                 self.s3_client.head_object,
                 Bucket=bucket,
                 Key=key,
                 operation_name="head_object"
             )
-            
-            file_size = metadata.get('ContentLength', 0)
+            logger.info(f"Retrieved metadata for {bucket}/{key}")
             
             # Create a transfer config
             config = boto3.s3.transfer.TransferConfig(
@@ -757,39 +745,21 @@ class AWSClient(QObject):
                 use_threads=True
             )
             
-            # Set up callback handler for progress
-            class ProgressCallback:
-                def __init__(self, callback_func, stop_event):
-                    self.callback_func = callback_func
-                    self.stop_event = stop_event
-                    self.total_size = file_size
-                    self.downloaded = 0
-                    self.last_percent = 0
-                
-                def __call__(self, bytes_amount):
-                    if self.stop_event.is_set():
+            # Create wrapper callback that checks the stop event
+            download_callback = None
+            if progress_callback:
+                def wrapped_callback(bytes_amount):
+                    if self._download_stop.is_set():
                         return False
-                    
-                    self.downloaded += bytes_amount
-                    percent = int(min(100, self.downloaded * 100 / self.total_size)) if self.total_size else 0
-                    
-                    # Only call the callback if progress has changed by at least 1%
-                    if percent > self.last_percent:
-                        self.last_percent = percent
-                        # If callback exists and returns False, cancel the download
-                        if self.callback_func and not self.callback_func(percent):
-                            self.stop_event.set()
-                            return False
-                    
-                    return True
+                    return progress_callback(bytes_amount)
+                download_callback = wrapped_callback
             
             # Ensure directory exists
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             
-            progress_tracker = ProgressCallback(progress_callback, self._download_stop) if progress_callback else None
-            callback_kwargs = {'Callback': progress_tracker} if progress_tracker else {}
-            
             # Execute the download with automatic multipart handling
+            callback_kwargs = {'Callback': download_callback} if download_callback else {}
+            
             self.s3_client.download_file(
                 bucket, 
                 key, 
