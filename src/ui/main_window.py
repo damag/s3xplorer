@@ -608,7 +608,7 @@ class MainWindow(QMainWindow):
         
         # Complete the Upload operation
         for operation_id, operation in self.operations_window.operations.items():
-            if operation['type'] == "Upload": # Correctly handles both file/dir
+            if operation['type'] in ["Upload", "Upload Directory"]:
                 self.operations_window.complete_operation(operation_id)
                 break
     
