@@ -141,10 +141,10 @@ class MainWindow(QMainWindow):
         files_layout = QVBoxLayout(files_panel)
         files_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Files header
-        files_header = QLabel("Files")
-        files_header.setStyleSheet("font-size: 14px; font-weight: bold; padding: 5px;")
-        files_layout.addWidget(files_header)
+        # Files header with current directory
+        self.files_header = QLabel("/")
+        self.files_header.setStyleSheet("font-size: 14px; font-weight: bold; padding: 5px;")
+        files_layout.addWidget(self.files_header)
         
         # Files list
         self.files_list = QTableWidget()
@@ -431,6 +431,10 @@ class MainWindow(QMainWindow):
         item_name = index.data()
         
         if item_type == "directory":
+            # Update the current directory label
+            display_path = "/" + item_path if item_path else "/"
+            self.files_header.setText(f"Current Directory: {display_path}")
+            
             # If the "Root" directory is selected, show root files
             if item_name == "/" and item_path == "":
                 self.update_files_list("")
