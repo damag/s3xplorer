@@ -5,6 +5,12 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PyQt6.QtCore import Qt
 from src.core.aws_client import AWSClient
 import keyring
+import time
+import threading
+from typing import Optional, Dict, Any, List
+from src.utils import get_logger
+
+logger = get_logger()
 
 class AuthDialog(QDialog):
     def __init__(self, parent=None):
@@ -167,7 +173,7 @@ class AuthDialog(QDialog):
     
     def handle_sso_code(self, code: str):
         """Handle the SSO authorization code."""
-        self.aws_client.debug_print(f"Received authorization code: {code}")  # Use debug_print
+        logger.debug(f"Received authorization code: {code}")
         self.sso_code_label.setText(code)
         self.sso_code_label.show()
         self.sso_code_label.parent().show()  # Show the parent QGroupBox
@@ -202,13 +208,13 @@ class AuthDialog(QDialog):
             self.cancel_button.setEnabled(True)
     
     def handle_connect(self):
-        self.aws_client.debug_print("handle_connect called")  # Use debug_print
+        logger.debug("handle_connect called")
         current_tab = self.tabs.currentIndex()
-        self.aws_client.debug_print(f"Current tab: {current_tab}")  # Use debug_print
+        logger.debug(f"Current tab: {current_tab}")
         
         try:
             if current_tab == 0:  # SSO tab
-                self.aws_client.debug_print("Starting SSO authentication...")  # Use debug_print
+                logger.debug("Starting SSO authentication...")
                 region = self.sso_region_input.text().strip()
                 if not region:
                     QMessageBox.warning(
@@ -245,7 +251,7 @@ class AuthDialog(QDialog):
                     )
                     return
                 
-                self.aws_client.debug_print(f"SSO parameters validated: region={region}, account_id={account_id}, role_name={role_name}, start_url={start_url}")  # Use debug_print
+                logger.debug(f"SSO parameters validated: region={region}, account_id={account_id}, role_name={role_name}, start_url={start_url}")
                 
                 # Disable UI during SSO process
                 self.connect_button.setEnabled(False)
