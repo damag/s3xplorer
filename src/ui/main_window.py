@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QStatusBar, QMenuBar, QMenu, QToolBar, QFileDialog,
                              QMessageBox, QGroupBox, QSplitter, QListWidget, QListWidgetItem,
                              QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox)
-from PyQt6.QtCore import Qt, QSize, QTimer, QSettings
+from PyQt6.QtCore import Qt, QSize, QTimer, QSettings, QModelIndex
 from PyQt6.QtGui import QAction, QIcon
 from src.ui.auth_dialog import AuthDialog
 from src.ui.models import BucketTreeModel, ObjectTableModel, S3ObjectTreeModel
@@ -318,6 +318,14 @@ class MainWindow(QMainWindow):
         if dialog.exec() == AuthDialog.DialogCode.Accepted:
             self.aws_client = dialog.get_aws_client()
             self.aws_client.set_verbose_mode(self.verbose_mode)
+            
+            # Get and display account information
+            account_info = self.aws_client.get_account_info()
+            if account_info:
+                self.status_bar.showMessage(f"Connected as {account_info['arn']}")
+            else:
+                self.status_bar.showMessage("Connected to AWS")
+            
             self.refresh_buckets()
     
     def toggle_operations_window(self):
@@ -365,6 +373,10 @@ class MainWindow(QMainWindow):
         bucket_name = current.text()
         self.current_bucket = bucket_name
         
+        # Reset the current directory to root
+        self.files_header.setText("/")
+        self.directories_tree.setCurrentIndex(QModelIndex())  # Clear directory selection
+        
         # Create signals for the worker
         signals = WorkerSignals()
         signals.data.connect(self.handle_objects_data)
@@ -380,7 +392,7 @@ class MainWindow(QMainWindow):
         )
         worker = ListObjectsWorker(self.aws_client, bucket_name, signals)
         self.worker_manager.start_worker(worker, operation_id)
-        self.status_bar.showMessage("Loading objects in {bucket_name}...")
+        self.status_bar.showMessage(f"Loading objects in {bucket_name}...")
     
     def handle_objects_data(self, objects):
         """Handle the objects data from the worker."""

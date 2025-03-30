@@ -684,3 +684,20 @@ class AWSClient(QObject):
         except Exception as e:
             self.debug_print(f"AWSClient: Download failed with error: {str(e)}")
             return False 
+
+    def get_account_info(self) -> Optional[Dict[str, str]]:
+        """Get AWS account information using STS get_caller_identity."""
+        if not self.session:
+            return None
+        
+        try:
+            sts_client = self.session.client('sts')
+            response = sts_client.get_caller_identity()
+            return {
+                'account': response['Account'],
+                'arn': response['Arn'],
+                'user_id': response['UserId']
+            }
+        except Exception as e:
+            self.debug_print(f"Error getting account info: {str(e)}")
+            return None 
