@@ -14,7 +14,7 @@ A modern, user-friendly S3 browser application built with PyQt6. This applicatio
 
 ## Requirements
 
-- Python 3.8 or higher
+- Python 3
 - PyQt6
 - boto3 (AWS SDK for Python)
 

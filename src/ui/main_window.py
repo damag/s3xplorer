@@ -737,9 +737,18 @@ class MainWindow(QMainWindow):
         if self.operations_window:
             # Find the operation by matching the status text
             for operation_id, operation in self.operations_window.operations.items():
-                if operation['status'] == status:
+                # For directory operations, the status includes the current file being processed
+                if operation['type'] in ["Upload Directory", "Download Directory"]:
+                    # Update progress and status
                     self.operations_window.update_progress(operation_id, progress)
-                    break
+                    status_item = self.operations_window.operations_table.item(operation['row'], 5)
+                    if status_item:
+                        status_item.setText(status)
+                else:
+                    # For single file operations, match the exact status
+                    if operation['status'] == status:
+                        self.operations_window.update_progress(operation_id, progress)
+                        break
     
     def handle_operation_cancel(self, operation_id: str):
         """Handle cancellation of an operation."""

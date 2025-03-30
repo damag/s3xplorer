@@ -36,12 +36,12 @@ class OperationsWindow(QWidget):
         self.operations_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
         
         # Set column widths
-        self.operations_table.setColumnWidth(0, 100)  # Operation
-        self.operations_table.setColumnWidth(1, 200)  # File (reduced from stretch)
+        self.operations_table.setColumnWidth(0, 150)  # Operation (increased from 100 to accommodate "Download Directory")
+        self.operations_table.setColumnWidth(1, 200)  # File
         self.operations_table.setColumnWidth(2, 100)  # Size
         self.operations_table.setColumnWidth(3, 100)  # Speed
         self.operations_table.setColumnWidth(4, 200)  # Progress
-        self.operations_table.setColumnWidth(5, 300)  # Status (increased from 100)
+        self.operations_table.setColumnWidth(5, 300)  # Status
         self.operations_table.setColumnWidth(6, 40)   # Cancel button
         
         self.operations_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -156,9 +156,12 @@ class OperationsWindow(QWidget):
         
         # Calculate and update speed
         if operation['file_size']:
-            elapsed = operation['start_time'].msecsTo(QDateTime.currentDateTime()) / 1000.0
+            current_time = QDateTime.currentDateTime()
+            elapsed = operation['start_time'].msecsTo(current_time) / 1000.0
             if elapsed > 0:
-                bytes_per_second = (progress / 100.0 * operation['file_size'] - self.last_progress[operation_id]) / elapsed
+                # Calculate bytes transferred based on progress
+                bytes_transferred = (progress / 100.0) * operation['file_size']
+                bytes_per_second = bytes_transferred / elapsed
                 speed_item = self.operations_table.item(operation['row'], 3)
                 if speed_item:
                     speed_item.setText(self.format_speed(bytes_per_second))

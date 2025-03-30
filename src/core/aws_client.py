@@ -50,7 +50,7 @@ class AWSClient(QObject):
             self.s3_client = self.session.client('s3')
             return True
         except Exception as e:
-            print(f"Authentication failed: {str(e)}")
+            self.debug_print(f"Authentication failed: {str(e)}")
             return False
     
     def authenticate_with_profile(self, profile_name: str) -> bool:
@@ -61,10 +61,10 @@ class AWSClient(QObject):
             self.current_profile = profile_name
             return True
         except ProfileNotFound:
-            print(f"Profile '{profile_name}' not found")
+            self.debug_print(f"Profile '{profile_name}' not found")
             return False
         except Exception as e:
-            print(f"Authentication failed: {str(e)}")
+            self.debug_print(f"Authentication failed: {str(e)}")
             return False
     
     def authenticate_with_sso(self, start_url: str, region: str, account_id: str, role_name: str) -> bool:

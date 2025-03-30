@@ -167,7 +167,7 @@ class AuthDialog(QDialog):
     
     def handle_sso_code(self, code: str):
         """Handle the SSO authorization code."""
-        print(f"Received authorization code: {code}")  # Debug print
+        self.aws_client.debug_print(f"Received authorization code: {code}")  # Use debug_print
         self.sso_code_label.setText(code)
         self.sso_code_label.show()
         self.sso_code_label.parent().show()  # Show the parent QGroupBox
@@ -202,13 +202,13 @@ class AuthDialog(QDialog):
             self.cancel_button.setEnabled(True)
     
     def handle_connect(self):
-        print("handle_connect called")  # Debug print
+        self.aws_client.debug_print("handle_connect called")  # Use debug_print
         current_tab = self.tabs.currentIndex()
-        print(f"Current tab: {current_tab}")  # Debug print
+        self.aws_client.debug_print(f"Current tab: {current_tab}")  # Use debug_print
         
         try:
             if current_tab == 0:  # SSO tab
-                print("Starting SSO authentication...")  # Debug print
+                self.aws_client.debug_print("Starting SSO authentication...")  # Use debug_print
                 region = self.sso_region_input.text().strip()
                 if not region:
                     QMessageBox.warning(
@@ -218,64 +218,34 @@ class AuthDialog(QDialog):
                     )
                     return
                 
-                # Validate and format account ID
                 account_id = self.account_id_input.text().strip()
                 if not account_id:
                     QMessageBox.warning(
                         self,
                         "Error",
-                        "Please specify an Account ID for SSO authentication."
+                        "Please specify an account ID for SSO authentication."
                     )
                     return
                 
-                # Remove any non-digit characters from account ID
-                account_id = ''.join(filter(str.isdigit, account_id))
-                if not account_id or len(account_id) != 12:
-                    QMessageBox.warning(
-                        self,
-                        "Error",
-                        "Invalid Account ID format. Please enter a valid 12-digit AWS account number."
-                    )
-                    return
-                
-                # Validate role name
                 role_name = self.role_name_input.text().strip()
                 if not role_name:
                     QMessageBox.warning(
                         self,
                         "Error",
-                        "Please specify a Role Name for SSO authentication."
+                        "Please specify a role name for SSO authentication."
                     )
                     return
                 
-                # Validate role name format (should be alphanumeric with hyphens and underscores)
-                if not all(c.isalnum() or c in '-_' for c in role_name):
-                    QMessageBox.warning(
-                        self,
-                        "Error",
-                        "Invalid Role Name format. Role names can only contain alphanumeric characters, hyphens, and underscores."
-                    )
-                    return
-                
-                # Validate start URL
                 start_url = self.start_url_input.text().strip()
                 if not start_url:
                     QMessageBox.warning(
                         self,
                         "Error",
-                        "Please specify a Start URL for SSO authentication."
+                        "Please specify a start URL for SSO authentication."
                     )
                     return
                 
-                if not start_url.startswith('https://'):
-                    QMessageBox.warning(
-                        self,
-                        "Error",
-                        "Start URL must begin with 'https://'"
-                    )
-                    return
-                
-                print(f"SSO parameters validated: region={region}, account_id={account_id}, role_name={role_name}, start_url={start_url}")  # Debug print
+                self.aws_client.debug_print(f"SSO parameters validated: region={region}, account_id={account_id}, role_name={role_name}, start_url={start_url}")  # Use debug_print
                 
                 # Disable UI during SSO process
                 self.connect_button.setEnabled(False)
