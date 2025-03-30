@@ -1100,9 +1100,30 @@ class MainWindow(QMainWindow):
                 })
         
         # Add these objects to our existing objects
+        new_objects_added = False
         for obj in objects:
             if obj not in self.current_objects:
                 self.current_objects.append(obj)
+                new_objects_added = True
+        
+        # Update the directory tree model if new objects were added
+        if new_objects_added:
+            # Save the current selected directory
+            current_item = None
+            selected_indexes = self.directories_tree.selectedIndexes()
+            if selected_indexes:
+                current_item = self.directory_tree_model.get_item_path(selected_indexes[0])
+            
+            # Create and set directory tree model (directories only)
+            self.directory_tree_model = S3ObjectTreeModel(self.current_objects, directories_only=True)
+            self.directories_tree.setModel(self.directory_tree_model)
+            
+            # Expand the tree view to show deeper levels
+            self.directories_tree.expandToDepth(5)
+            
+            # Try to reselect the previously selected directory
+            if current_item:
+                self._select_directory_in_tree(current_item)
         
         # Update the files list for the current directory
         current_prefix = self.files_header.text().strip("/")
@@ -1115,3 +1136,31 @@ class MainWindow(QMainWindow):
             if operation['type'] == "List Directory":
                 self.operations_window.complete_operation(operation_id)
                 break
+    
+    def _select_directory_in_tree(self, directory_path):
+        """Select a directory in the tree view."""
+        # Start from the root index
+        root_index = QModelIndex()
+        
+        # Find the directory by iterating through the tree
+        self._find_and_select_directory(root_index, directory_path)
+    
+    def _find_and_select_directory(self, parent_index, target_path):
+        """Recursively find and select a directory in the tree."""
+        # Check if this is the directory we're looking for
+        if parent_index.isValid():
+            item_path = self.directory_tree_model.get_item_path(parent_index)
+            if item_path == target_path:
+                # Found it, select it and return True
+                self.directories_tree.setCurrentIndex(parent_index)
+                return True
+        
+        # Check children
+        row_count = self.directory_tree_model.rowCount(parent_index)
+        for row in range(row_count):
+            child_index = self.directory_tree_model.index(row, 0, parent_index)
+            if self._find_and_select_directory(child_index, target_path):
+                return True
+        
+        # Not found in this branch
+        return False
