@@ -1,20 +1,54 @@
 import boto3
 import botocore
-from botocore.exceptions import ClientError, ProfileNotFound
-from typing import List, Dict, Optional, Any, Callable
+from botocore.exceptions import ClientError, ProfileNotFound, NoCredentialsError
+from botocore.client import Config as BotoConfig
+from typing import List, Dict, Optional, Any, Callable, Tuple
 import os
 import json
 import keyring
 import time
 import webbrowser
 from datetime import datetime
-from PyQt6.QtWidgets import QMessageBox, QInputDialog
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QEventLoop
 import threading
 import queue
+import json
+
+from PyQt6.QtWidgets import QMessageBox, QInputDialog
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QEventLoop
+
+from src.utils import get_logger, get_config, get_file_service
+
+logger = get_logger()
+config = get_config()
+file_service = get_file_service()
+
+class AWSError(Exception):
+    """Custom exception for AWS errors with detailed information."""
+    def __init__(self, message, code=None, operation=None, details=None):
+        self.message = message
+        self.code = code
+        self.operation = operation
+        self.details = details or {}
+        super().__init__(self.message)
+    
+    def __str__(self):
+        result = f"{self.message}"
+        if self.code:
+            result += f" (Code: {self.code})"
+        if self.operation:
+            result += f" during {self.operation}"
+        return result
+    
+    def to_dict(self):
+        return {
+            'message': self.message,
+            'code': self.code,
+            'operation': self.operation,
+            'details': self.details
+        }
 
 class AWSClient(QObject):
-    """AWS client with SSO support."""
+    """AWS client with improved error handling and retry mechanism."""
     sso_code_ready = pyqtSignal(str)  # Signal to show the SSO code
     sso_status_update = pyqtSignal(str)  # Signal for status updates
     sso_completed = pyqtSignal(bool)  # Signal to indicate authentication completion
@@ -29,43 +63,215 @@ class AWSClient(QObject):
         self._sso_auth_data = None
         self.verbose_mode = False
         self._download_stop = threading.Event()
+        
+        # Pagination settings
+        self.page_size = 1000  # Default max items per page
+        self.max_pages = 20    # Maximum number of pages to fetch (for safety)
+        
+        # Retry configuration
+        self.max_retries = 5   # Maximum number of retries
+        self.retry_delay = 1   # Base delay in seconds
+        self.exponential_backoff = True  # Use exponential backoff for retries
+        
+        # Load client settings from config
+        self._load_settings()
+    
+    def _load_settings(self):
+        """Load client settings from config."""
+        self.page_size = config.get('page_size', 1000)
+        self.max_retries = config.get('max_retries', 5)
+        self.retry_delay = config.get('retry_delay', 1)
+        self.exponential_backoff = config.get('exponential_backoff', True)
     
     def set_verbose_mode(self, verbose: bool):
         """Set verbose mode for debug output."""
         self.verbose_mode = verbose
+        if verbose:
+            logger.set_level("DEBUG")
     
-    def debug_print(self, message: str):
-        """Print debug message if verbose mode is enabled."""
-        if self.verbose_mode:
-            print(message)
+    def _execute_with_retry(self, func, *args, **kwargs):
+        """Execute a function with retry mechanism."""
+        operation_name = kwargs.pop('operation_name', func.__name__)
+        retries = 0
+        last_exception = None
+        
+        while retries <= self.max_retries:
+            try:
+                if retries > 0:
+                    # Log retry attempt
+                    logger.info(f"Retry attempt {retries}/{self.max_retries} for {operation_name}")
+                
+                # Execute the function
+                return func(*args, **kwargs)
+                
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code')
+                error_message = e.response.get('Error', {}).get('Message')
+                
+                # Log the error
+                logger.error(f"AWS error in {operation_name}: {error_code} - {error_message}")
+                
+                # Check if the error is retryable
+                if error_code in ['SlowDown', 'ThrottlingException', 'RequestLimitExceeded',
+                                 'RequestTimeout', 'InternalError', 'ServiceUnavailable',
+                                 'ProvisionedThroughputExceededException']:
+                    last_exception = AWSError(
+                        message=error_message,
+                        code=error_code,
+                        operation=operation_name,
+                        details=e.response
+                    )
+                    retries += 1
+                    
+                    # Calculate delay with exponential backoff if enabled
+                    if self.exponential_backoff:
+                        delay = self.retry_delay * (2 ** (retries - 1))
+                    else:
+                        delay = self.retry_delay
+                    
+                    logger.info(f"Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                else:
+                    # Non-retryable error
+                    raise AWSError(
+                        message=error_message,
+                        code=error_code,
+                        operation=operation_name,
+                        details=e.response
+                    )
+            
+            except (ConnectionError, TimeoutError) as e:
+                logger.error(f"Connection error in {operation_name}: {str(e)}")
+                last_exception = AWSError(
+                    message=str(e),
+                    operation=operation_name
+                )
+                retries += 1
+                
+                # Calculate delay with exponential backoff if enabled
+                if self.exponential_backoff:
+                    delay = self.retry_delay * (2 ** (retries - 1))
+                else:
+                    delay = self.retry_delay
+                
+                logger.info(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+                
+            except Exception as e:
+                # Log and re-raise any other exceptions
+                logger.error(f"Unexpected error in {operation_name}: {str(e)}")
+                raise AWSError(
+                    message=str(e),
+                    operation=operation_name
+                )
+        
+        # If we've exhausted all retries, raise the last exception
+        if last_exception:
+            logger.error(f"All retry attempts failed for {operation_name}")
+            raise last_exception
     
     def authenticate_with_access_key(self, access_key: str, secret_key: str, region: str = "us-east-1") -> bool:
         """Authenticate using AWS access key and secret key."""
         try:
+            logger.info(f"Authenticating with access key in region {region}")
+            
+            # Configure S3 with extended timeout and retry settings
+            s3_config = BotoConfig(
+                region_name=region,
+                signature_version='s3v4',
+                retries={
+                    'max_attempts': self.max_retries,
+                    'mode': 'standard'
+                },
+                connect_timeout=30,
+                read_timeout=60
+            )
+            
             self.session = boto3.Session(
                 aws_access_key_id=access_key,
                 aws_secret_access_key=secret_key,
                 region_name=region
             )
-            self.s3_client = self.session.client('s3')
+            
+            # Create S3 client with the extended config
+            self.s3_client = self.session.client('s3', config=s3_config)
+            
+            # Test credentials by listing buckets
+            self._execute_with_retry(
+                self.s3_client.list_buckets,
+                operation_name="test_credentials"
+            )
+            
+            logger.info("Authentication with access key successful")
             return True
+            
+        except NoCredentialsError:
+            logger.error("No credentials provided")
+            raise AWSError(message="No credentials provided", operation="authenticate_with_access_key")
+            
         except Exception as e:
-            self.debug_print(f"Authentication failed: {str(e)}")
-            return False
+            logger.error(f"Authentication failed: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Authentication failed: {str(e)}",
+                    operation="authenticate_with_access_key"
+                )
     
     def authenticate_with_profile(self, profile_name: str) -> bool:
         """Authenticate using a named AWS profile."""
         try:
+            logger.info(f"Authenticating with profile '{profile_name}'")
+            
             self.session = boto3.Session(profile_name=profile_name)
-            self.s3_client = self.session.client('s3')
+            
+            # Get the region from the profile or use default
+            region = self.session.region_name or config.get('default_region', 'us-east-1')
+            
+            # Configure S3 with extended timeout and retry settings
+            s3_config = BotoConfig(
+                region_name=region,
+                signature_version='s3v4',
+                retries={
+                    'max_attempts': self.max_retries,
+                    'mode': 'standard'
+                },
+                connect_timeout=30,
+                read_timeout=60
+            )
+            
+            # Create S3 client with the extended config
+            self.s3_client = self.session.client('s3', config=s3_config)
+            
+            # Set current profile
             self.current_profile = profile_name
+            
+            # Test credentials by listing buckets
+            self._execute_with_retry(
+                self.s3_client.list_buckets,
+                operation_name="test_credentials"
+            )
+            
+            logger.info(f"Authentication with profile '{profile_name}' successful")
             return True
+            
         except ProfileNotFound:
-            self.debug_print(f"Profile '{profile_name}' not found")
-            return False
+            logger.error(f"Profile '{profile_name}' not found")
+            raise AWSError(
+                message=f"Profile '{profile_name}' not found",
+                operation="authenticate_with_profile"
+            )
+            
         except Exception as e:
-            self.debug_print(f"Authentication failed: {str(e)}")
-            return False
+            logger.error(f"Authentication failed: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Authentication failed: {str(e)}",
+                    operation="authenticate_with_profile"
+                )
     
     def authenticate_with_sso(self, start_url: str, region: str, account_id: str, role_name: str) -> bool:
         """Authenticate using AWS SSO."""
@@ -222,482 +428,587 @@ class AWSClient(QObject):
     
     def list_buckets(self) -> List[Dict[str, Any]]:
         """List all S3 buckets."""
-        if not self.s3_client:
-            raise Exception("Not authenticated")
-        
         try:
-            response = self.s3_client.list_buckets()
-            return response['Buckets']
-        except ClientError as e:
-            print(f"Error listing buckets: {str(e)}")
-            return []
-    
-    def list_objects(self, bucket: str, prefix: str = "") -> List[Dict[str, Any]]:
-        """List objects in a bucket with optional prefix."""
-        if not self.s3_client:
-            raise Exception("Not authenticated")
-        
-        try:
-            paginator = self.s3_client.get_paginator('list_objects_v2')
-            objects = []
+            logger.info("Listing S3 buckets")
             
-            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                if 'Contents' in page:
-                    objects.extend(page['Contents'])
-            
-            return objects
-        except ClientError as e:
-            print(f"Error listing objects: {str(e)}")
-            return []
-    
-    def upload_file(self, file_path: str, bucket: str, key: str, progress_callback: Optional[Callable[[int], bool]] = None) -> bool:
-        """Upload a file to S3 with progress tracking and cancellation support."""
-        try:
-            # Get file size for progress calculation
-            file_size = os.path.getsize(file_path)
-            if file_size == 0:
-                self.debug_print("Warning: File size reported as 0.")
-                # Handle 0-byte files by just uploading them
-                if progress_callback:
-                    progress_callback(0)
-                self.s3_client.upload_file(file_path, bucket, key)
-                return True
-
-            uploaded_size = 0
-            cancel_requested = False
-
-            def callback(bytes_amount):
-                nonlocal uploaded_size, cancel_requested
-                # Check if cancellation was already requested
-                if cancel_requested:
-                    raise RuntimeError("Upload cancelled by user callback.")
-
-                uploaded_size += bytes_amount
-                if progress_callback and file_size > 0:
-                    progress = int((uploaded_size / file_size) * 100)
-                    # Clamp progress between 0 and 100
-                    progress = max(0, min(100, progress))
-                    
-                    # Call the provided progress_callback (which checks worker's is_cancelled)
-                    if not progress_callback(progress):
-                        self.debug_print("AWSClient: progress_callback returned False. Requesting cancel.")
-                        cancel_requested = True
-                        # Raise exception immediately to try and stop the transfer
-                        raise RuntimeError("Upload cancelled by user callback.")
-                elif progress_callback:  # Handle 0-byte files or files where size wasn't obtained
-                    progress_callback(0)  # Report 0 progress, but check cancellation
-                    if cancel_requested:  # Check again in case callback set it
-                        raise RuntimeError("Upload cancelled by user callback.")
-
-            # Configure transfer - use threads=False for simplicity and stability
-            config = boto3.s3.transfer.TransferConfig(
-                use_threads=False  # Let's try disabling internal threading first
-            )
-
-            self.debug_print(f"Starting boto3 upload_file for {file_path} to {bucket}/{key}")
-            self.s3_client.upload_file(
-                file_path,
-                bucket,
-                key,
-                Callback=callback,
-                Config=config
+            response = self._execute_with_retry(
+                self.s3_client.list_buckets,
+                operation_name="list_buckets"
             )
             
-            # If we reach here without the exception, the upload finished before cancellation took effect
-            # Or it finished successfully.
-            self.debug_print("boto3 upload_file completed without cancellation exception.")
-            return True
-
-        except RuntimeError as e:
-            # Catch our specific cancellation exception
-            if str(e) == "Upload cancelled by user callback.":
-                self.debug_print("AWSClient: Caught cancellation exception. Upload stopped.")
-                return False
-            else:
-                # Different runtime error
-                self.debug_print(f"AWSClient: Upload failed with runtime error: {e}")
-                return False
+            # Format the response
+            buckets = []
+            for bucket in response.get('Buckets', []):
+                buckets.append({
+                    'name': bucket.get('Name', ''),
+                    'creation_date': bucket.get('CreationDate', datetime.now()).isoformat()
+                })
+            
+            logger.info(f"Found {len(buckets)} buckets")
+            return buckets
+            
         except Exception as e:
-            # Catch other exceptions (ClientError, etc.)
-            self.debug_print(f"AWSClient: Upload failed with error: {str(e)}")
-            return False
+            logger.error(f"Error listing buckets: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Failed to list buckets: {str(e)}",
+                    operation="list_buckets"
+                )
     
-    def download_file(self, bucket: str, key: str, save_path: str, progress_callback: Optional[Callable[[int], bool]] = None) -> bool:
-        """Download a file from S3 using boto3's download_file with cancellation support via callback."""
-        f = None # Keep track of file handle for potential cleanup
+    def list_objects(self, bucket: str, prefix: str = '', delimiter: str = '/') -> Dict[str, Any]:
+        """List objects in an S3 bucket with pagination support."""
         try:
-            # Get object size for progress calculation
-            self.debug_print(f"Getting metadata for {bucket}/{key}")
-            head_response = self.s3_client.head_object(Bucket=bucket, Key=key)
-            file_size = head_response.get('ContentLength', 0)
-            if file_size == 0:
-                 self.debug_print("Warning: File size reported as 0.")
-                 # Decide how to handle 0-byte files, maybe download anyway? For now, proceed.
-
-            downloaded_size = 0
-            cancel_requested = False
-
-            def callback(bytes_amount):
-                nonlocal downloaded_size, cancel_requested
-                # Check if cancellation was already requested by the progress callback
-                if cancel_requested:
-                    # We need to raise an exception here to stop boto3's transfer manager
-                    raise RuntimeError("Download cancelled by user callback.")
-
-                downloaded_size += bytes_amount
-                if progress_callback and file_size > 0:
-                    progress = int((downloaded_size / file_size) * 100)
-                    # Clamp progress between 0 and 100
-                    progress = max(0, min(100, progress))
-                    
-                    # Call the provided progress_callback (which checks worker's is_cancelled)
-                    if not progress_callback(progress):
-                        self.debug_print("AWSClient: progress_callback returned False. Requesting cancel.")
-                        cancel_requested = True
-                        # Raise exception immediately to try and stop the transfer
-                        raise RuntimeError("Download cancelled by user callback.")
-                elif progress_callback: # Handle 0-byte files or files where size wasn't obtained
-                     progress_callback(0) # Report 0 progress, but check cancellation
-                     if cancel_requested: # Check again in case callback set it
-                          raise RuntimeError("Download cancelled by user callback.")
-
-            # Ensure target directory exists
-            self.debug_print(f"Ensuring directory exists: {os.path.dirname(save_path)}")
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-            # Configure transfer - use threads=False for simplicity and maybe stability?
-            # Max concurrency 1 might help ensure callbacks are more predictable?
-            config = boto3.s3.transfer.TransferConfig(
-                use_threads=False, # Let's try disabling internal threading first
-                # max_concurrency=1 
-            )
-
-            self.debug_print(f"Starting boto3 download_file for {key} to {save_path}")
-            # Open the file handle *before* starting download for cleanup
-            f = open(save_path, 'wb')
-            f.close() # Close immediately, boto3 download_file will reopen/write
+            logger.info(f"Listing objects in bucket '{bucket}' with prefix '{prefix}'")
             
-            self.s3_client.download_file(
+            # Parameters for the list_objects_v2 call
+            params = {
+                'Bucket': bucket,
+                'MaxKeys': self.page_size,
+                'Delimiter': delimiter
+            }
+            
+            if prefix:
+                params['Prefix'] = prefix
+            
+            # Initialize result containers
+            all_objects = []
+            all_prefixes = []
+            
+            # Handle pagination
+            continuation_token = None
+            page_count = 0
+            
+            while True:
+                page_count += 1
+                
+                # Add continuation token if we have one
+                if continuation_token:
+                    params['ContinuationToken'] = continuation_token
+                
+                # Make the API call
+                response = self._execute_with_retry(
+                    self.s3_client.list_objects_v2,
+                    **params,
+                    operation_name="list_objects"
+                )
+                
+                # Process objects
+                for obj in response.get('Contents', []):
+                    all_objects.append({
+                        'key': obj.get('Key', ''),
+                        'size': obj.get('Size', 0),
+                        'last_modified': obj.get('LastModified', datetime.now()).isoformat(),
+                        'etag': obj.get('ETag', '').strip('"'),
+                        'storage_class': obj.get('StorageClass', 'STANDARD'),
+                        'is_directory': obj.get('Key', '').endswith('/')
+                    })
+                
+                # Process prefixes (directories)
+                for prefix_obj in response.get('CommonPrefixes', []):
+                    prefix_value = prefix_obj.get('Prefix', '')
+                    # Only add it if it's not just the current prefix
+                    if prefix_value and prefix_value != prefix:
+                        all_prefixes.append({
+                            'prefix': prefix_value,
+                            'name': prefix_value.rstrip('/').split('/')[-1] if '/' in prefix_value else prefix_value.rstrip('/')
+                        })
+                
+                # Check if there are more pages
+                if not response.get('IsTruncated', False) or page_count >= self.max_pages:
+                    break
+                
+                # Get the continuation token for the next page
+                continuation_token = response.get('NextContinuationToken')
+            
+            logger.info(f"Found {len(all_objects)} objects and {len(all_prefixes)} directories")
+            
+            return {
+                'objects': all_objects,
+                'prefixes': all_prefixes,
+                'bucket': bucket,
+                'current_prefix': prefix
+            }
+            
+        except Exception as e:
+            logger.error(f"Error listing objects in bucket '{bucket}': {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Failed to list objects in bucket '{bucket}': {str(e)}",
+                    operation="list_objects",
+                    details={'bucket': bucket, 'prefix': prefix}
+                )
+    
+    def upload_file(self, file_path: str, bucket: str, key: str, 
+                    extra_args: Dict[str, Any] = None,
+                    progress_callback: Callable[[int], bool] = None) -> bool:
+        """
+        Upload a file to S3 with progress tracking and multipart for large files.
+        
+        Args:
+            file_path: Local file path to upload
+            bucket: S3 bucket name
+            key: S3 object key
+            extra_args: Additional arguments for the upload (content type, metadata, etc.)
+            progress_callback: Callback for progress updates, returns False to cancel
+            
+        Returns:
+            bool: Success or failure
+        """
+        try:
+            # Validate file exists
+            if not os.path.exists(file_path):
+                raise AWSError(
+                    message=f"File not found: {file_path}",
+                    operation="upload_file"
+                )
+            
+            file_size = os.path.getsize(file_path)
+            logger.info(f"Uploading file '{file_path}' ({file_size} bytes) to {bucket}/{key}")
+            
+            # Create a transfer config for multipart uploads
+            config = boto3.s3.transfer.TransferConfig(
+                multipart_threshold=8 * 1024 * 1024,  # 8MB
+                max_concurrency=10,
+                multipart_chunksize=8 * 1024 * 1024,  # 8MB
+                use_threads=True
+            )
+            
+            # Set up callback handler for progress
+            class ProgressCallback:
+                def __init__(self, callback_func):
+                    self.callback_func = callback_func
+                    self.total_size = file_size
+                    self.uploaded = 0
+                    self.last_percent = 0
+                
+                def __call__(self, bytes_amount):
+                    self.uploaded += bytes_amount
+                    percent = int(min(100, self.uploaded * 100 / self.total_size))
+                    
+                    # Only call the callback if progress has changed by at least 1%
+                    if percent > self.last_percent:
+                        self.last_percent = percent
+                        # If callback exists and returns False, cancel the upload
+                        if self.callback_func and not self.callback_func(percent):
+                            return False
+                    
+                    return True
+            
+            progress_tracker = ProgressCallback(progress_callback) if progress_callback else None
+            callback_kwargs = {'Callback': progress_tracker} if progress_tracker else {}
+            
+            # Extra args for the upload
+            upload_args = extra_args or {}
+            
+            # Execute the upload with automatic multipart handling
+            self.s3_client.upload_file(
+                file_path, 
+                bucket, 
+                key,
+                Config=config,
+                ExtraArgs=upload_args,
+                **callback_kwargs
+            )
+            
+            logger.info(f"Successfully uploaded {file_path} to {bucket}/{key}")
+            return True
+            
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code')
+            error_message = e.response.get('Error', {}).get('Message')
+            logger.error(f"S3 upload error: {error_code} - {error_message}")
+            raise AWSError(
+                message=error_message or "Upload failed",
+                code=error_code,
+                operation="upload_file",
+                details={'bucket': bucket, 'key': key}
+            )
+            
+        except Exception as e:
+            logger.error(f"Error uploading file: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Upload failed: {str(e)}",
+                    operation="upload_file",
+                    details={'bucket': bucket, 'key': key}
+                )
+    
+    def download_file(self, bucket: str, key: str, save_path: str,
+                     progress_callback: Callable[[int], bool] = None) -> bool:
+        """
+        Download a file from S3 with progress tracking.
+        
+        Args:
+            bucket: S3 bucket name
+            key: S3 object key
+            save_path: Local path to save the file
+            progress_callback: Callback for progress updates, returns False to cancel
+            
+        Returns:
+            bool: Success or failure
+        """
+        try:
+            logger.info(f"Downloading {bucket}/{key} to {save_path}")
+            
+            # Reset download stop event
+            self._download_stop.clear()
+            
+            # Get object metadata to determine size
+            metadata = self._execute_with_retry(
+                self.s3_client.head_object,
                 Bucket=bucket,
                 Key=key,
-                Filename=save_path,
-                Callback=callback,
-                Config=config
+                operation_name="head_object"
             )
             
-            # If we reach here without the exception, the download finished before cancellation took effect
-            # Or it finished successfully.
-            # We rely on the callback raising exception for cancellation.
-            self.debug_print("boto3 download_file completed without cancellation exception.")
-            # Check final size just in case
-            final_size = os.path.getsize(save_path)
-            if file_size > 0 and final_size != file_size:
-                 self.debug_print(f"Warning: Final file size {final_size} does not match expected size {file_size}.")
-                 # Consider this potentially incomplete? For now, return True if no error.
+            file_size = metadata.get('ContentLength', 0)
             
-            return True
-
-        except RuntimeError as e:
-            # Catch our specific cancellation exception
-            if str(e) == "Download cancelled by user callback.":
-                self.debug_print("AWSClient: Caught cancellation exception. Download stopped.")
-                # Cleanup is handled in finally
-                return False
-            else:
-                # Different runtime error
-                self.debug_print(f"AWSClient: Download failed with runtime error: {e}")
-                # Cleanup handled in finally
-                return False
-        except Exception as e:
-            # Catch other exceptions (ClientError, etc.)
-            self.debug_print(f"AWSClient: Download failed with error: {str(e)}")
-            # Cleanup handled in finally
-            return False
+            # Create a transfer config
+            config = boto3.s3.transfer.TransferConfig(
+                multipart_threshold=8 * 1024 * 1024,  # 8MB
+                max_concurrency=10,
+                multipart_chunksize=8 * 1024 * 1024,  # 8MB
+                use_threads=True
+            )
             
-        finally:
-            self.debug_print("AWSClient: Download function finally block.")
-            # Cleanup: Remove the file if cancel was requested or if an error occurred
-            # Need to check if 'e' or 'cancel_requested' exist/are true
-            error_occurred = 'e' in locals() 
-            should_delete = cancel_requested or error_occurred
+            # Set up callback handler for progress
+            class ProgressCallback:
+                def __init__(self, callback_func, stop_event):
+                    self.callback_func = callback_func
+                    self.stop_event = stop_event
+                    self.total_size = file_size
+                    self.downloaded = 0
+                    self.last_percent = 0
+                
+                def __call__(self, bytes_amount):
+                    if self.stop_event.is_set():
+                        return False
+                    
+                    self.downloaded += bytes_amount
+                    percent = int(min(100, self.downloaded * 100 / self.total_size)) if self.total_size else 0
+                    
+                    # Only call the callback if progress has changed by at least 1%
+                    if percent > self.last_percent:
+                        self.last_percent = percent
+                        # If callback exists and returns False, cancel the download
+                        if self.callback_func and not self.callback_func(percent):
+                            self.stop_event.set()
+                            return False
+                    
+                    return True
             
-            self.debug_print(f"Cleanup check: cancel_requested={cancel_requested}, error_occurred={error_occurred}, should_delete={should_delete}")
-
-            if should_delete:
-                try:
-                    if os.path.exists(save_path):
-                        self.debug_print(f"Cleanup: Removing potentially partial file: {save_path}")
-                        # Ensure file handle 'f' is closed if it was somehow opened and left
-                        # (though it shouldn't be in this flow anymore)
-                        if f and not f.closed:
-                             f.close()
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            
+            progress_tracker = ProgressCallback(progress_callback, self._download_stop) if progress_callback else None
+            callback_kwargs = {'Callback': progress_tracker} if progress_tracker else {}
+            
+            # Execute the download with automatic multipart handling
+            self.s3_client.download_file(
+                bucket, 
+                key, 
+                save_path,
+                Config=config,
+                **callback_kwargs
+            )
+            
+            if self._download_stop.is_set():
+                logger.info(f"Download of {bucket}/{key} was cancelled")
+                if os.path.exists(save_path):
+                    try:
                         os.remove(save_path)
-                    else:
-                         self.debug_print("Cleanup: File does not exist, no removal needed.")
-                except Exception as remove_err:
-                    self.debug_print(f"Cleanup: Error removing file: {remove_err}")
+                    except:
+                        pass
+                return False
+            
+            logger.info(f"Successfully downloaded {bucket}/{key} to {save_path}")
+            return True
+            
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code')
+            error_message = e.response.get('Error', {}).get('Message')
+            logger.error(f"S3 download error: {error_code} - {error_message}")
+            
+            # Clean up partial download
+            if os.path.exists(save_path):
+                try:
+                    os.remove(save_path)
+                except:
+                    pass
+            
+            raise AWSError(
+                message=error_message or "Download failed",
+                code=error_code,
+                operation="download_file",
+                details={'bucket': bucket, 'key': key}
+            )
+            
+        except Exception as e:
+            logger.error(f"Error downloading file: {str(e)}")
+            
+            # Clean up partial download
+            if os.path.exists(save_path):
+                try:
+                    os.remove(save_path)
+                except:
+                    pass
+            
+            if isinstance(e, AWSError):
+                raise
             else:
-                 self.debug_print("Cleanup: No need to remove file.")
-            self.debug_print("AWSClient: Download function finished.")
+                raise AWSError(
+                    message=f"Download failed: {str(e)}",
+                    operation="download_file",
+                    details={'bucket': bucket, 'key': key}
+                )
     
     def delete_object(self, bucket: str, key: str) -> bool:
         """Delete an object from S3."""
-        if not self.s3_client:
-            raise Exception("Not authenticated")
-        
         try:
-            self.s3_client.delete_object(Bucket=bucket, Key=key)
-            return True
-        except ClientError as e:
-            print(f"Error deleting object: {str(e)}")
-            return False
-    
-    def get_object_metadata(self, bucket: str, key: str) -> Optional[Dict[str, Any]]:
-        """Get metadata for an S3 object."""
-        if not self.s3_client:
-            raise Exception("Not authenticated")
-        
-        try:
-            response = self.s3_client.head_object(Bucket=bucket, Key=key)
-            return response
-        except ClientError as e:
-            print(f"Error getting object metadata: {str(e)}")
-            return None
-    
-    def save_credentials(self, profile_name: str, access_key: str, secret_key: str):
-        """Save AWS credentials securely using keyring."""
-        try:
-            keyring.set_password(
-                "s3xplorer",
-                f"aws_access_key_{profile_name}",
-                access_key
-            )
-            keyring.set_password(
-                "s3xplorer",
-                f"aws_secret_key_{profile_name}",
-                secret_key
-            )
-            return True
-        except Exception as e:
-            print(f"Error saving credentials: {str(e)}")
-            return False
-    
-    def load_credentials(self, profile_name: str) -> Optional[Dict[str, str]]:
-        """Load AWS credentials from keyring."""
-        try:
-            access_key = keyring.get_password(
-                "s3xplorer",
-                f"aws_access_key_{profile_name}"
-            )
-            secret_key = keyring.get_password(
-                "s3xplorer",
-                f"aws_secret_key_{profile_name}"
+            logger.info(f"Deleting object {bucket}/{key}")
+            
+            self._execute_with_retry(
+                self.s3_client.delete_object,
+                Bucket=bucket,
+                Key=key,
+                operation_name="delete_object"
             )
             
-            if access_key and secret_key:
-                return {
-                    "access_key": access_key,
-                    "secret_key": secret_key
-                }
-            return None
-        except Exception as e:
-            print(f"Error loading credentials: {str(e)}")
-            return None
-    
-    def upload_directory(self, directory_path: str, bucket: str, prefix: str = "", progress_callback: Optional[Callable[[int, str], bool]] = None) -> bool:
-        """Upload a directory recursively to S3 with progress tracking and cancellation support."""
-        try:
-            # Get total size for progress calculation
-            total_size = 0
-            file_count = 0
-            for root, _, files in os.walk(directory_path):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    total_size += os.path.getsize(file_path)
-                    file_count += 1
-
-            if total_size == 0:
-                self.debug_print("Warning: Directory size reported as 0.")
-                if progress_callback:
-                    progress_callback(0, "Uploading directory...")
-                return True
-
-            uploaded_size = 0
-            files_uploaded = 0
-            cancel_requested = False
-
-            # First, create a directory marker for the selected directory
-            dir_name = os.path.basename(directory_path)
-            dir_key = os.path.join(prefix, dir_name, "").replace("\\", "/")
-            self.s3_client.put_object(Bucket=bucket, Key=dir_key)
-            files_uploaded += 1
-
-            for root, _, files in os.walk(directory_path):
-                for file in files:
-                    if cancel_requested:
-                        return False
-
-                    file_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(file_path, directory_path)
-                    key = os.path.join(prefix, dir_name, rel_path).replace("\\", "/")
-
-                    # Get file size for individual file progress
-                    file_size = os.path.getsize(file_path)
-                    if file_size == 0:
-                        if progress_callback:
-                            progress_callback(0, f"Uploading {rel_path}...")
-                        self.s3_client.upload_file(file_path, bucket, key)
-                        files_uploaded += 1
-                        continue
-
-                    def file_progress_callback(bytes_amount):
-                        nonlocal uploaded_size, cancel_requested
-                        if cancel_requested:
-                            raise RuntimeError("Upload cancelled by user callback.")
-
-                        uploaded_size += bytes_amount
-                        if progress_callback and total_size > 0:
-                            progress = int((uploaded_size / total_size) * 100)
-                            progress = max(0, min(100, progress))
-                            if not progress_callback(progress, f"Uploading {rel_path}..."):
-                                cancel_requested = True
-                                raise RuntimeError("Upload cancelled by user callback.")
-
-                    config = boto3.s3.transfer.TransferConfig(use_threads=False)
-                    self.s3_client.upload_file(
-                        file_path,
-                        bucket,
-                        key,
-                        Callback=file_progress_callback,
-                        Config=config
-                    )
-                    files_uploaded += 1
-
+            logger.info(f"Successfully deleted {bucket}/{key}")
             return True
-
-        except RuntimeError as e:
-            if str(e) == "Upload cancelled by user callback.":
-                self.debug_print("AWSClient: Caught cancellation exception. Upload stopped.")
-                return False
-            else:
-                self.debug_print(f"AWSClient: Upload failed with runtime error: {e}")
-                return False
+            
         except Exception as e:
-            self.debug_print(f"AWSClient: Upload failed with error: {str(e)}")
-            return False
-
-    def download_directory(self, bucket: str, prefix: str, save_path: str, progress_callback: Optional[Callable[[int, str], bool]] = None) -> bool:
-        """Download a directory recursively from S3 with progress tracking and cancellation support."""
-        try:
-            # List all objects with the prefix
-            objects = self.list_objects(bucket, prefix)
-            if not objects:
-                self.debug_print("Warning: No objects found with prefix.")
-                if progress_callback:
-                    progress_callback(0, "Downloading directory...")
-                return True
-
-            # Calculate total size
-            total_size = sum(obj["Size"] for obj in objects)
-            if total_size == 0:
-                self.debug_print("Warning: Directory size reported as 0.")
-                if progress_callback:
-                    progress_callback(0, "Downloading directory...")
-                return True
-
-            downloaded_size = 0
-            files_downloaded = 0
-            cancel_requested = False
-
-            # Create the target directory
-            os.makedirs(save_path, exist_ok=True)
-
-            # Get the directory name from the prefix
-            dir_name = os.path.basename(prefix.rstrip("/"))
-            if dir_name:
-                # Create a directory marker
-                marker_path = os.path.join(save_path, dir_name)
-                os.makedirs(marker_path, exist_ok=True)
-                files_downloaded += 1
-
-            for obj in objects:
-                if cancel_requested:
-                    return False
-
-                key = obj["Key"]
-                file_size = obj["Size"]
-                
-                # Skip the directory marker
-                if key.endswith("/"):
-                    continue
-                    
-                # Get the relative path from the prefix
-                rel_path = os.path.relpath(key, prefix)
-                if rel_path == ".":  # Skip if it's the directory itself
-                    continue
-                    
-                local_path = os.path.join(save_path, dir_name, rel_path)
-
-                # Create directory structure
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-
-                if file_size == 0:
-                    if progress_callback:
-                        progress_callback(0, f"Downloading {rel_path}...")
-                    # Create empty file
-                    open(local_path, 'wb').close()
-                    files_downloaded += 1
-                    continue
-
-                def file_progress_callback(bytes_amount):
-                    nonlocal downloaded_size, cancel_requested
-                    if cancel_requested:
-                        raise RuntimeError("Download cancelled by user callback.")
-
-                    downloaded_size += bytes_amount
-                    if progress_callback and total_size > 0:
-                        progress = int((downloaded_size / total_size) * 100)
-                        progress = max(0, min(100, progress))
-                        if not progress_callback(progress, f"Downloading {rel_path}..."):
-                            cancel_requested = True
-                            raise RuntimeError("Download cancelled by user callback.")
-
-                config = boto3.s3.transfer.TransferConfig(use_threads=False)
-                self.s3_client.download_file(
-                    bucket,
-                    key,
-                    local_path,
-                    Callback=file_progress_callback,
-                    Config=config
+            logger.error(f"Error deleting object {bucket}/{key}: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Delete failed: {str(e)}",
+                    operation="delete_object",
+                    details={'bucket': bucket, 'key': key}
                 )
-                files_downloaded += 1
-
-            return True
-
-        except RuntimeError as e:
-            if str(e) == "Download cancelled by user callback.":
-                self.debug_print("AWSClient: Caught cancellation exception. Download stopped.")
-                return False
-            else:
-                self.debug_print(f"AWSClient: Download failed with runtime error: {e}")
-                return False
-        except Exception as e:
-            self.debug_print(f"AWSClient: Download failed with error: {str(e)}")
-            return False 
-
-    def get_account_info(self) -> Optional[Dict[str, str]]:
-        """Get AWS account information using STS get_caller_identity."""
-        if not self.session:
-            return None
-        
+    
+    def cancel_download(self):
+        """Cancel an ongoing download."""
+        logger.info("Cancelling download")
+        self._download_stop.set()
+    
+    def get_object_url(self, bucket: str, key: str, expiration: int = 3600) -> str:
+        """Generate a pre-signed URL for an object."""
         try:
-            sts_client = self.session.client('sts')
-            response = sts_client.get_caller_identity()
-            return {
-                'account': response['Account'],
-                'arn': response['Arn'],
-                'user_id': response['UserId']
-            }
+            logger.info(f"Generating pre-signed URL for {bucket}/{key}")
+            
+            url = self._execute_with_retry(
+                self.s3_client.generate_presigned_url,
+                ClientMethod='get_object',
+                Params={
+                    'Bucket': bucket,
+                    'Key': key
+                },
+                ExpiresIn=expiration,
+                operation_name="generate_presigned_url"
+            )
+            
+            logger.info(f"URL generated for {bucket}/{key}")
+            return url
+            
         except Exception as e:
-            self.debug_print(f"Error getting account info: {str(e)}")
-            return None 
+            logger.error(f"Error generating URL for {bucket}/{key}: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"URL generation failed: {str(e)}",
+                    operation="get_object_url",
+                    details={'bucket': bucket, 'key': key}
+                )
+    
+    def get_object_metadata(self, bucket: str, key: str) -> Dict[str, Any]:
+        """Get metadata for an S3 object."""
+        try:
+            logger.info(f"Getting metadata for {bucket}/{key}")
+            
+            response = self._execute_with_retry(
+                self.s3_client.head_object,
+                Bucket=bucket,
+                Key=key,
+                operation_name="head_object"
+            )
+            
+            # Extract and format metadata
+            metadata = {
+                'content_type': response.get('ContentType', 'application/octet-stream'),
+                'content_length': response.get('ContentLength', 0),
+                'last_modified': response.get('LastModified', datetime.now()).isoformat(),
+                'etag': response.get('ETag', '').strip('"'),
+                'storage_class': response.get('StorageClass', 'STANDARD'),
+                'metadata': response.get('Metadata', {})
+            }
+            
+            logger.info(f"Retrieved metadata for {bucket}/{key}")
+            return metadata
+            
+        except Exception as e:
+            logger.error(f"Error getting metadata for {bucket}/{key}: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Failed to get metadata: {str(e)}",
+                    operation="get_object_metadata",
+                    details={'bucket': bucket, 'key': key}
+                )
+    
+    def copy_object(self, source_bucket: str, source_key: str, 
+                  dest_bucket: str, dest_key: str) -> bool:
+        """Copy an object within S3."""
+        try:
+            logger.info(f"Copying {source_bucket}/{source_key} to {dest_bucket}/{dest_key}")
+            
+            copy_source = {
+                'Bucket': source_bucket,
+                'Key': source_key
+            }
+            
+            self._execute_with_retry(
+                self.s3_client.copy_object,
+                CopySource=copy_source,
+                Bucket=dest_bucket,
+                Key=dest_key,
+                operation_name="copy_object"
+            )
+            
+            logger.info(f"Successfully copied {source_bucket}/{source_key} to {dest_bucket}/{dest_key}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error copying object: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Copy failed: {str(e)}",
+                    operation="copy_object",
+                    details={
+                        'source_bucket': source_bucket,
+                        'source_key': source_key,
+                        'dest_bucket': dest_bucket,
+                        'dest_key': dest_key
+                    }
+                )
+    
+    def create_bucket(self, bucket_name: str, region: str = None) -> bool:
+        """Create a new S3 bucket."""
+        try:
+            logger.info(f"Creating bucket {bucket_name}")
+            
+            # If no region specified, use the client's region
+            if not region and self.session:
+                region = self.session.region_name
+            
+            # Create the bucket
+            params = {'Bucket': bucket_name}
+            
+            # If region is not the default us-east-1, add LocationConstraint
+            if region and region != 'us-east-1':
+                params['CreateBucketConfiguration'] = {
+                    'LocationConstraint': region
+                }
+            
+            self._execute_with_retry(
+                self.s3_client.create_bucket,
+                **params,
+                operation_name="create_bucket"
+            )
+            
+            logger.info(f"Successfully created bucket {bucket_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error creating bucket {bucket_name}: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Bucket creation failed: {str(e)}",
+                    operation="create_bucket",
+                    details={'bucket': bucket_name, 'region': region}
+                )
+    
+    def delete_bucket(self, bucket_name: str, force: bool = False) -> bool:
+        """Delete an S3 bucket."""
+        try:
+            logger.info(f"Deleting bucket {bucket_name}")
+            
+            # If force is True, delete all objects first
+            if force:
+                logger.info(f"Force delete requested for {bucket_name}, removing all objects")
+                self._delete_all_objects(bucket_name)
+            
+            # Delete the bucket
+            self._execute_with_retry(
+                self.s3_client.delete_bucket,
+                Bucket=bucket_name,
+                operation_name="delete_bucket"
+            )
+            
+            logger.info(f"Successfully deleted bucket {bucket_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting bucket {bucket_name}: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Bucket deletion failed: {str(e)}",
+                    operation="delete_bucket",
+                    details={'bucket': bucket_name}
+                )
+    
+    def _delete_all_objects(self, bucket_name: str) -> bool:
+        """Delete all objects in a bucket."""
+        try:
+            logger.info(f"Deleting all objects in bucket {bucket_name}")
+            
+            # List all objects
+            result = self.list_objects(bucket_name)
+            objects = result.get('objects', [])
+            
+            if not objects:
+                logger.info(f"Bucket {bucket_name} is already empty")
+                return True
+            
+            # Delete objects in batches
+            batch_size = 1000  # Max objects per delete operation
+            for i in range(0, len(objects), batch_size):
+                batch = objects[i:i+batch_size]
+                
+                delete_keys = {'Objects': [{'Key': obj['key']} for obj in batch]}
+                
+                self._execute_with_retry(
+                    self.s3_client.delete_objects,
+                    Bucket=bucket_name,
+                    Delete=delete_keys,
+                    operation_name="delete_objects"
+                )
+            
+            logger.info(f"Successfully deleted {len(objects)} objects from {bucket_name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting objects from {bucket_name}: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Failed to delete objects: {str(e)}",
+                    operation="_delete_all_objects",
+                    details={'bucket': bucket_name}
+                ) 
