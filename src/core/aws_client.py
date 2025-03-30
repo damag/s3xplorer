@@ -89,6 +89,32 @@ class AWSClient(QObject):
         if verbose:
             logger.set_level("DEBUG")
     
+    def debug_print(self, message: str):
+        """Print debug message if verbose mode is enabled."""
+        logger.debug(message)
+    
+    def get_account_info(self) -> dict:
+        """Get AWS account information."""
+        try:
+            if not self.session:
+                logger.error("Cannot get account info: No active session")
+                return None
+            
+            sts_client = self.session.client('sts')
+            identity = self._execute_with_retry(
+                sts_client.get_caller_identity,
+                operation_name="get_account_info"
+            )
+            
+            return {
+                'account_id': identity['Account'],
+                'user_id': identity['UserId'],
+                'arn': identity['Arn']
+            }
+        except Exception as e:
+            logger.error(f"Error getting account info: {str(e)}")
+            return None
+    
     def _execute_with_retry(self, func, *args, **kwargs):
         """Execute a function with retry mechanism."""
         operation_name = kwargs.pop('operation_name', func.__name__)
