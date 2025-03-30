@@ -2,8 +2,6 @@
 
 A modern, user-friendly S3 browser application built with PyQt6. This application allows you to browse, upload, download, and manage files in your Amazon S3 buckets with an intuitive graphical interface.
 
-![S3xplorer Screenshot](resources/screenshot.png)
-
 ## Features
 
 - Browse S3 buckets and objects
