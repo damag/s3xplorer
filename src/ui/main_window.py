@@ -710,33 +710,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", "Please select a bucket first")
             return
         
-        # Check if a directory is selected in the tree view
-        selected_indexes = self.directories_tree.selectedIndexes()
-        if selected_indexes:
-            index = selected_indexes[0]
-            item_type = self.directory_tree_model.get_item_type(index)
-            if item_type == "directory":
-                # Handle directory deletion
-                prefix = self.directory_tree_model.get_item_path(index)
-                dir_name = os.path.basename(prefix.rstrip("/"))
-                
-                # Count objects in the directory
-                object_count = sum(1 for obj in self.current_objects 
-                                 if obj["Key"].startswith(prefix))
-                
-                # Confirm deletion
-                reply = QMessageBox.question(
-                    self,
-                    "Confirm Delete Directory",
-                    f"Are you sure you want to delete directory '{dir_name}' and all its contents ({object_count} objects)?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                
-                if reply == QMessageBox.StandardButton.Yes:
-                    self._delete_directory(prefix)
-                return
+        # Call the unified delete handler
+        self.handle_delete_object()
+    
+    def handle_delete_object(self):
+        """Handle object deletion (single or multiple files)."""
+        if not self.aws_client or not self.current_bucket:
+            QMessageBox.warning(self, "Warning", "Please select a bucket first")
+            return
         
-        # Handle file deletion
+        # Handle the case when called directly from context menu or toolbar button
         selected_rows = self.files_list.selectedItems()
         if not selected_rows:
             QMessageBox.warning(self, "Warning", "Please select files to delete")
@@ -745,66 +728,61 @@ class MainWindow(QMainWindow):
         # Get unique rows (since we're selecting cells)
         rows = set(item.row() for item in selected_rows)
         
-        # Confirm deletion
+        # Collect keys to delete
+        keys_to_delete = []
+        for row in rows:
+            key_data = self.files_list.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            self.debug_print(f"Retrieved key data for row {row}: {key_data} (Type: {type(key_data)}) ")
+            # Ensure the key is a string before adding
+            if isinstance(key_data, str):
+                keys_to_delete.append(key_data)
+            else:
+                self.debug_print(f"Skipping invalid key data for row {row}: {key_data}")
+        
+        if not keys_to_delete:
+            QMessageBox.warning(self, "Warning", "No valid files selected for deletion.")
+            return
+        
+        # Confirm deletion once for all files
         reply = QMessageBox.question(
             self,
             "Confirm Delete",
-            f"Are you sure you want to delete {len(rows)} selected file(s)?",
+            f"Are you sure you want to delete {len(keys_to_delete)} selected file(s)?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            for row in rows:
-                # Get the full key from the item's data
-                key = self.files_list.item(row, 0).data(Qt.ItemDataRole.UserRole)
-                self._delete_object(key)
-    
-    def _delete_directory(self, prefix):
-        """Delete a directory and all its contents from S3."""
-        # Create and start the worker
-        operation_id = self.operations_window.add_operation(
-            "Delete", 
-            f"Deleting directory {prefix} from bucket: {self.current_bucket}",
-            None,
-            None
-        )
-        worker = DeleteDirectoryWorker(self.aws_client, self.current_bucket, prefix)
-        
-        # Connect signals
-        worker.signals.finished.connect(lambda: self.handle_delete_finished(prefix))
-        worker.signals.error.connect(lambda msg, exc, k=prefix: self.handle_worker_error(msg, exc))
-        worker.signals.progress.connect(self.handle_worker_progress)
-        
-        self.worker_manager.start_worker(worker, operation_id)
-        self.status_bar.showMessage(f"Deleting directory {prefix}...")
-    
-    def _delete_object(self, key):
-        """Delete a single S3 object."""
-        # Create and start the worker
-        operation_id = self.operations_window.add_operation(
-            "Delete", 
-            f"Deleting {key} from bucket: {self.current_bucket}",
-            None,
-            None
-        )
-        worker = DeleteWorker(self.aws_client, self.current_bucket, key)
-        
-        # Connect signals
-        worker.signals.finished.connect(lambda k=key: self.handle_delete_finished(k))
-        worker.signals.error.connect(lambda msg, exc, k=key: self.handle_worker_error(msg, exc))
-        worker.signals.progress.connect(self.handle_worker_progress)
-        
-        self.worker_manager.start_worker(worker, operation_id)
-        self.status_bar.showMessage(f"Deleting {key}...")
+            for file_key in keys_to_delete:
+                # Add debug print
+                self.debug_print(f"Creating DeleteWorker for key: {file_key} (Type: {type(file_key)})")
+                
+                # Create and start the worker for each file
+                operation_id = self.operations_window.add_operation(
+                    "Delete", 
+                    f"Deleting {file_key} from bucket: {self.current_bucket}",
+                    file_key,
+                    None
+                )
+                worker = DeleteWorker(self.aws_client, self.current_bucket, file_key)
+                
+                # Connect signals - create a proper closure for the lambda
+                current_key = file_key  # Create a local copy to avoid lambda issues
+                worker.signals.finished.connect(lambda k=current_key: self.handle_delete_finished(k))
+                worker.signals.error.connect(self.handle_worker_error)
+                worker.signals.progress.connect(self.handle_worker_progress)
+                
+                self.worker_manager.start_worker(worker, operation_id)
+            
+            self.status_bar.showMessage(f"Deleting {len(keys_to_delete)} files...")
     
     def handle_delete_finished(self, key):
         """Handle successful deletion."""
         self.status_bar.showMessage(f"Deleted {key}")
         self.handle_refresh()
         
-        # Complete the Delete operation for this key
+        # Find and complete the Delete operation for this specific key
         for operation_id, operation in self.operations_window.operations.items():
-            if operation['type'] == "Delete":
+            if operation['type'] == "Delete" and operation.get('file_path') == key:
                 self.operations_window.complete_operation(operation_id)
                 break
     
@@ -827,7 +805,7 @@ class MainWindow(QMainWindow):
         # Find the operation ID based on context if possible (e.g., context=key for download/delete)
         # This logic might need refinement depending on how context is passed
         operation_id_to_mark = None
-        if context:
+        if context and isinstance(context, str):
             # This is a simplistic search, assumes context (like filename) is part of operation type string
             for op_id, op_data in self.operations_window.operations.items():
                 if context in op_data.get('type', ''):
@@ -855,7 +833,7 @@ class MainWindow(QMainWindow):
                  del self.operations_window.operations[operation_id_to_mark]
         
         # Don't show message box for intentional cancellations
-        if "download cancelled" in error_msg.lower():
+        if error_msg and "download cancelled" in error_msg.lower():
             return
         
         QMessageBox.critical(self, "Operation Error", f"An error occurred: {error_msg}")
@@ -1014,48 +992,6 @@ class MainWindow(QMainWindow):
         self.worker_manager.start_worker(worker, operation_id)
         self.status_bar.showMessage("Deleting directory...")
 
-    def handle_delete_object(self):
-        """Handle object deletion."""
-        if not self.aws_client or not self.current_bucket:
-            QMessageBox.warning(self, "Warning", "Please select a bucket first")
-            return
-        
-        # Get selected file from the table
-        if not self.files_list.selectedItems():
-            QMessageBox.warning(self, "Warning", "Please select a file to delete")
-            return
-        
-        selected_row = self.files_list.selectedItems()[0].row()
-        key = self.files_list.item(selected_row, 0).data(Qt.ItemDataRole.UserRole)
-        
-        # Confirm deletion
-        reply = QMessageBox.question(
-            self, 
-            "Confirm File Deletion",
-            f"Are you sure you want to delete the file '{key}'? This action cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        
-        operation_id = self.operations_window.add_operation(
-            "Delete Object", 
-            f"Deleting {key} from bucket: {self.current_bucket}",
-            key,
-            0
-        )
-        worker = DeleteWorker(self.aws_client, self.current_bucket, key)
-        
-        # Connect signals
-        worker.signals.finished.connect(lambda: self.handle_delete_finished(key))
-        worker.signals.error.connect(self.handle_worker_error)
-        worker.signals.progress.connect(self.handle_worker_progress)
-        
-        self.worker_manager.start_worker(worker, operation_id)
-        self.status_bar.showMessage("Deleting object...")
-
     def load_directory_contents(self, prefix):
         """Load directory contents for the specific prefix for better browsing of deep hierarchies."""
         # Only load if we already have the bucket selected
@@ -1206,17 +1142,26 @@ class MainWindow(QMainWindow):
         upload_action = menu.addAction("Upload")
         upload_action.triggered.connect(self.handle_upload_file)
         
-        download_action = menu.addAction("Download")
-        download_action.triggered.connect(self.handle_download_file)
-        
-        delete_action = menu.addAction("Delete")
-        delete_action.triggered.connect(self.handle_delete_object)
+        # For multiple selection, we handle download and delete differently
+        if len(rows) > 1:
+            download_action = menu.addAction(f"Download {len(rows)} files")
+            download_action.triggered.connect(self.handle_download)
+            
+            delete_action = menu.addAction(f"Delete {len(rows)} files")
+            delete_action.triggered.connect(self.handle_delete_object)
+        else:
+            # Single file selection
+            download_action = menu.addAction("Download")
+            download_action.triggered.connect(self.handle_download_file)
+            
+            delete_action = menu.addAction("Delete")
+            delete_action.triggered.connect(self.handle_delete_object)
         
         menu.addSeparator()
         
         # Only show URL and Properties for single file selection
         if len(rows) == 1:
-            row = rows.pop()
+            row = list(rows)[0]
             key = self.files_list.item(row, 0).data(Qt.ItemDataRole.UserRole)
             
             generate_url_action = menu.addAction("Generate URL")

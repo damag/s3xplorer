@@ -43,8 +43,8 @@ def main():
     
     # Configure logging level based on verbose flag
     if args.verbose:
-        logger.set_level("DEBUG")
-        logger.debug("Verbose logging enabled")
+        logger.setLevel("DEBUG")
+        logger.debug("Verbose mode enabled.")
     
     # Create the application
     app = QApplication(sys.argv)

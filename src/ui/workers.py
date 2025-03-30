@@ -378,6 +378,7 @@ class DeleteWorker(BaseWorker):
         self.bucket = bucket
         self.key = key
         self.status = f"Deleting {key} from {bucket}"
+        self.start_time = time.time()
 
     def run(self):
         """Delete an object from S3."""
@@ -385,15 +386,30 @@ class DeleteWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(self.operation_id, 0, self.status, 0.0)
+            self.signals.progress.emit(self.operation_id, 0, f"Preparing to delete {self.key}...", 0.0)
+            
+            # Add a small delay to show the initial state
+            time.sleep(0.1)
+            
+            if self.is_cancelled():
+                return
             
             # Delete the object
+            self.signals.progress.emit(self.operation_id, 50, f"Deleting {self.key}...", 0.0)
             self.aws_client.delete_object(self.bucket, self.key)
             
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(self.operation_id, 100, self.status, 0.0)
+            # Calculate operation duration
+            duration = time.time() - self.start_time
+            
+            self.signals.progress.emit(
+                self.operation_id, 
+                100, 
+                f"Deleted {self.key} in {duration:.1f}s", 
+                0.0
+            )
             self.signals.success.emit(f"Deleted {self.key} from {self.bucket}")
             self.signals.finished.emit()
             

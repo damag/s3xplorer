@@ -84,10 +84,12 @@ class AWSClient(QObject):
         self.exponential_backoff = config.get('exponential_backoff', True)
     
     def set_verbose_mode(self, verbose: bool):
-        """Set verbose mode for debug output."""
+        """Set verbose mode for the logger."""
         self.verbose_mode = verbose
         if verbose:
-            logger.set_level("DEBUG")
+            logger.setLevel("DEBUG")
+        else:
+            logger.setLevel("INFO")
     
     def debug_print(self, message: str):
         """Print debug message if verbose mode is enabled."""
