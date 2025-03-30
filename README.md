@@ -20,6 +20,8 @@ A modern, user-friendly S3 browser application built with PyQt6. This applicatio
 
 ## Installation
 
+### From Source
+
 1. Clone the repository:
 ```bash
 git clone https://github.com/damag/s3xplorer.git
@@ -37,11 +39,35 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+### Windows Executable
+
+1. Download the latest release from the releases page
+2. Extract the zip file
+3. Run `s3xplorer.exe`
+
+## Building Windows Executable
+
+To build a standalone Windows executable:
+
+1. Make sure you have all requirements installed:
+```bash
+pip install -r requirements.txt
+```
+
+2. Run the build script:
+```bash
+python build_windows.py
+```
+
+3. The executable will be created in the `dist` directory as `s3xplorer.exe`
+
+Note: Building the executable requires Windows. The resulting executable can be distributed and run on any Windows system without requiring Python installation.
+
 ## Usage
 
 1. Run the application:
 ```bash
-python src/main.py
+python run.py
 ```
 
 2. Enter your AWS credentials when prompted
