@@ -34,11 +34,11 @@ jobs:
         Compress-Archive -Path dist/s3xplorer.exe -DestinationPath s3xplorer-windows.zip
     
     - name: Upload release asset
-      uses: actions/upload-release-asset@v2
+      uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
         asset_path: ./s3xplorer-windows.zip
         asset_name: s3xplorer-windows.zip
-        asset_content_type: application/zip 
+        asset_content_type: application/zip
