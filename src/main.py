@@ -6,7 +6,7 @@ from src.ui.main_window import MainWindow
 
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='S3 Explorer - AWS S3 Browser')
+    parser = argparse.ArgumentParser(description='S3 Explorer')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
     args = parser.parse_args()
     

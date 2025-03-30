@@ -49,7 +49,7 @@ class MainWindow(QMainWindow):
     
     def setup_ui(self):
         """Setup the main window UI."""
-        self.setWindowTitle("S3 Explorer")
+        self.setWindowTitle("S3xplorer")
         self.setMinimumSize(800, 600)
         
         # Create toolbar
