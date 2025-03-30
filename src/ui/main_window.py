@@ -792,7 +792,7 @@ class MainWindow(QMainWindow):
             # Find the operation by matching the status text
             for operation_id, operation in self.operations_window.operations.items():
                 # For directory operations, the status includes the current file being processed
-                if operation['type'] in ["Upload Directory", "Download Directory"]:
+                if operation['type'] in ["Upload Directory", "Download Directory", "List Directory", "List Objects"]:
                     # Update progress and status
                     self.operations_window.update_progress(operation_id, progress)
                     status_item = self.operations_window.operations_table.item(operation['row'], 5)
@@ -1134,6 +1134,8 @@ class MainWindow(QMainWindow):
         # Complete the operation
         for operation_id, operation in self.operations_window.operations.items():
             if operation['type'] == "List Directory":
+                # Make sure we update progress to 100% before completing
+                self.operations_window.update_progress(operation_id, 100)
                 self.operations_window.complete_operation(operation_id)
                 break
     
