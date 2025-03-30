@@ -432,8 +432,8 @@ class MainWindow(QMainWindow):
         self.directory_tree_model = S3ObjectTreeModel(objects, directories_only=True)
         self.directories_tree.setModel(self.directory_tree_model)
         
-        # Expand root level of directories
-        self.directories_tree.expandToDepth(0)
+        # Expand more levels of directories to show the hierarchy
+        self.directories_tree.expandToDepth(5)  # Expand up to 5 levels deep
         
         # Clear the files list
         self.files_list.setRowCount(0)
