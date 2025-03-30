@@ -143,10 +143,11 @@ class ListBucketsWorker(BaseWorker):
 
 class ListObjectsWorker(BaseWorker):
     """Worker for listing objects in a bucket with improved pagination."""
-    def __init__(self, aws_client: AWSClient, bucket: str, prefix: str = ""):
+    def __init__(self, aws_client: AWSClient, bucket: str, prefix: str = "", recursive: bool = True):
         super().__init__(aws_client)
         self.bucket = bucket
         self.prefix = prefix
+        self.recursive = recursive
 
     def run(self):
         """List objects in a bucket."""
@@ -157,7 +158,7 @@ class ListObjectsWorker(BaseWorker):
             status_msg = f"Listing objects in {self.bucket}" + (f" with prefix: {self.prefix}" if self.prefix else "...")
             self.signals.progress.emit(0, status_msg)
             
-            result = self.aws_client.list_objects(self.bucket, self.prefix)
+            result = self.aws_client.list_objects(self.bucket, self.prefix, recursive=self.recursive)
             
             if self.is_cancelled():
                 return

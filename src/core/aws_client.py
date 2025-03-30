@@ -483,20 +483,36 @@ class AWSClient(QObject):
                     operation="list_buckets"
                 )
     
-    def list_objects(self, bucket: str, prefix: str = '', delimiter: str = '/') -> Dict[str, Any]:
-        """List objects in an S3 bucket with pagination support."""
+    def list_objects(self, bucket: str, prefix: str = '', delimiter: str = '/', recursive: bool = False) -> Dict[str, Any]:
+        """
+        List objects in an S3 bucket with pagination support.
+        
+        Args:
+            bucket: S3 bucket name
+            prefix: Prefix filter for objects
+            delimiter: Delimiter for grouping (use '/' for directory-like hierarchy)
+            recursive: If True, will recursively list all objects including in subdirectories
+        
+        Returns:
+            Dict with 'objects', 'prefixes', 'bucket', and 'current_prefix'
+        """
         try:
-            logger.info(f"Listing objects in bucket '{bucket}' with prefix '{prefix}'")
+            logger.info(f"Listing objects in bucket '{bucket}' with prefix '{prefix}' {'recursively' if recursive else ''}")
+            
+            # For recursive listing, don't use delimiter
+            actual_delimiter = None if recursive else delimiter
             
             # Parameters for the list_objects_v2 call
             params = {
                 'Bucket': bucket,
-                'MaxKeys': self.page_size,
-                'Delimiter': delimiter
+                'MaxKeys': self.page_size
             }
             
             if prefix:
                 params['Prefix'] = prefix
+                
+            if actual_delimiter:
+                params['Delimiter'] = actual_delimiter
             
             # Initialize result containers
             all_objects = []
@@ -532,14 +548,15 @@ class AWSClient(QObject):
                     })
                 
                 # Process prefixes (directories)
-                for prefix_obj in response.get('CommonPrefixes', []):
-                    prefix_value = prefix_obj.get('Prefix', '')
-                    # Only add it if it's not just the current prefix
-                    if prefix_value and prefix_value != prefix:
-                        all_prefixes.append({
-                            'prefix': prefix_value,
-                            'name': prefix_value.rstrip('/').split('/')[-1] if '/' in prefix_value else prefix_value.rstrip('/')
-                        })
+                if not recursive:  # Only process prefixes in non-recursive mode
+                    for prefix_obj in response.get('CommonPrefixes', []):
+                        prefix_value = prefix_obj.get('Prefix', '')
+                        # Only add it if it's not just the current prefix
+                        if prefix_value and prefix_value != prefix:
+                            all_prefixes.append({
+                                'prefix': prefix_value,
+                                'name': prefix_value.rstrip('/').split('/')[-1] if '/' in prefix_value else prefix_value.rstrip('/')
+                            })
                 
                 # Check if there are more pages
                 if not response.get('IsTruncated', False) or page_count >= self.max_pages:
