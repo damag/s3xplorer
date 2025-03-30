@@ -182,6 +182,126 @@ class DeleteWorker(BaseWorker):
         except Exception as e:
             self.signals.error.emit(str(e))
 
+class UploadDirectoryWorker(BaseWorker):
+    """Worker for uploading directories recursively to S3."""
+    def __init__(self, aws_client: AWSClient, directory_path: str, bucket: str, prefix: str, signals: WorkerSignals):
+        super().__init__(aws_client, signals)
+        self.directory_path = directory_path
+        self.bucket = bucket
+        self.prefix = prefix
+        self.status = f"Uploading directory {os.path.basename(directory_path)} to {bucket}"
+
+    def run(self):
+        try:
+            if self.is_cancelled():
+                return
+            
+            self.signals.progress.emit(0, self.status)
+            
+            # Use the AWS client's upload_directory method with progress callback
+            def progress_callback(progress, status):
+                if self.is_cancelled():
+                    return False
+                self.signals.progress.emit(progress, status)
+                return True
+            
+            success = self.aws_client.upload_directory(
+                self.directory_path,
+                self.bucket,
+                self.prefix,
+                progress_callback=progress_callback
+            )
+            
+            if self.is_cancelled():
+                return
+            
+            if success:
+                self.signals.progress.emit(100, self.status)
+                self.signals.finished.emit()
+            else:
+                self.signals.error.emit("Failed to upload directory")
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+class DownloadDirectoryWorker(BaseWorker):
+    """Worker for downloading directories recursively from S3."""
+    def __init__(self, aws_client: AWSClient, bucket: str, prefix: str, save_path: str, signals: WorkerSignals):
+        super().__init__(aws_client, signals)
+        self.bucket = bucket
+        self.prefix = prefix
+        self.save_path = save_path
+        self.status = f"Downloading directory {prefix} from {bucket}"
+
+    def run(self):
+        try:
+            if self.is_cancelled():
+                self.signals.error.emit("Download cancelled")
+                return
+            
+            self.signals.progress.emit(0, self.status)
+            
+            # Use the AWS client's download_directory method with progress callback
+            def progress_callback(progress, status):
+                if self.is_cancelled():
+                    self.signals.error.emit("Download cancelled")
+                    return False
+                self.signals.progress.emit(progress, status)
+                return True
+            
+            success = self.aws_client.download_directory(
+                self.bucket,
+                self.prefix,
+                self.save_path,
+                progress_callback=progress_callback
+            )
+            
+            if self.is_cancelled():
+                self.signals.error.emit("Download cancelled")
+                return
+            
+            if success:
+                self.signals.progress.emit(100, self.status)
+                self.signals.finished.emit()
+            else:
+                self.signals.error.emit("Failed to download directory")
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+class DeleteDirectoryWorker(BaseWorker):
+    """Worker for deleting directories recursively from S3."""
+    def __init__(self, aws_client: AWSClient, bucket: str, prefix: str, signals: WorkerSignals):
+        super().__init__(aws_client, signals)
+        self.bucket = bucket
+        self.prefix = prefix
+        self.status = f"Deleting directory {prefix} from {bucket}"
+
+    def run(self):
+        try:
+            if self.is_cancelled():
+                return
+            
+            self.signals.progress.emit(0, self.status)
+            
+            # List all objects with the prefix
+            objects = self.aws_client.list_objects(self.bucket, self.prefix)
+            
+            # Delete each object
+            for obj in objects:
+                if self.is_cancelled():
+                    return
+                
+                key = obj["Key"]
+                success = self.aws_client.delete_object(self.bucket, key)
+                
+                if not success:
+                    self.signals.error.emit(f"Failed to delete {key}")
+                    return
+            
+            self.signals.progress.emit(100, self.status)
+            self.signals.finished.emit()
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
 class WorkerManager:
     """Manages worker threads and their signals."""
     def __init__(self):

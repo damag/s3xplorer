@@ -502,4 +502,185 @@ class AWSClient(QObject):
             return None
         except Exception as e:
             print(f"Error loading credentials: {str(e)}")
-            return None 
+            return None
+    
+    def upload_directory(self, directory_path: str, bucket: str, prefix: str = "", progress_callback: Optional[Callable[[int, str], bool]] = None) -> bool:
+        """Upload a directory recursively to S3 with progress tracking and cancellation support."""
+        try:
+            # Get total size for progress calculation
+            total_size = 0
+            file_count = 0
+            for root, _, files in os.walk(directory_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    total_size += os.path.getsize(file_path)
+                    file_count += 1
+
+            if total_size == 0:
+                self.debug_print("Warning: Directory size reported as 0.")
+                if progress_callback:
+                    progress_callback(0, "Uploading directory...")
+                return True
+
+            uploaded_size = 0
+            files_uploaded = 0
+            cancel_requested = False
+
+            # First, create a directory marker for the selected directory
+            dir_name = os.path.basename(directory_path)
+            dir_key = os.path.join(prefix, dir_name, "").replace("\\", "/")
+            self.s3_client.put_object(Bucket=bucket, Key=dir_key)
+            files_uploaded += 1
+
+            for root, _, files in os.walk(directory_path):
+                for file in files:
+                    if cancel_requested:
+                        return False
+
+                    file_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(file_path, directory_path)
+                    key = os.path.join(prefix, dir_name, rel_path).replace("\\", "/")
+
+                    # Get file size for individual file progress
+                    file_size = os.path.getsize(file_path)
+                    if file_size == 0:
+                        if progress_callback:
+                            progress_callback(0, f"Uploading {rel_path}...")
+                        self.s3_client.upload_file(file_path, bucket, key)
+                        files_uploaded += 1
+                        continue
+
+                    def file_progress_callback(bytes_amount):
+                        nonlocal uploaded_size, cancel_requested
+                        if cancel_requested:
+                            raise RuntimeError("Upload cancelled by user callback.")
+
+                        uploaded_size += bytes_amount
+                        if progress_callback and total_size > 0:
+                            progress = int((uploaded_size / total_size) * 100)
+                            progress = max(0, min(100, progress))
+                            if not progress_callback(progress, f"Uploading {rel_path}..."):
+                                cancel_requested = True
+                                raise RuntimeError("Upload cancelled by user callback.")
+
+                    config = boto3.s3.transfer.TransferConfig(use_threads=False)
+                    self.s3_client.upload_file(
+                        file_path,
+                        bucket,
+                        key,
+                        Callback=file_progress_callback,
+                        Config=config
+                    )
+                    files_uploaded += 1
+
+            return True
+
+        except RuntimeError as e:
+            if str(e) == "Upload cancelled by user callback.":
+                self.debug_print("AWSClient: Caught cancellation exception. Upload stopped.")
+                return False
+            else:
+                self.debug_print(f"AWSClient: Upload failed with runtime error: {e}")
+                return False
+        except Exception as e:
+            self.debug_print(f"AWSClient: Upload failed with error: {str(e)}")
+            return False
+
+    def download_directory(self, bucket: str, prefix: str, save_path: str, progress_callback: Optional[Callable[[int, str], bool]] = None) -> bool:
+        """Download a directory recursively from S3 with progress tracking and cancellation support."""
+        try:
+            # List all objects with the prefix
+            objects = self.list_objects(bucket, prefix)
+            if not objects:
+                self.debug_print("Warning: No objects found with prefix.")
+                if progress_callback:
+                    progress_callback(0, "Downloading directory...")
+                return True
+
+            # Calculate total size
+            total_size = sum(obj["Size"] for obj in objects)
+            if total_size == 0:
+                self.debug_print("Warning: Directory size reported as 0.")
+                if progress_callback:
+                    progress_callback(0, "Downloading directory...")
+                return True
+
+            downloaded_size = 0
+            files_downloaded = 0
+            cancel_requested = False
+
+            # Create the target directory
+            os.makedirs(save_path, exist_ok=True)
+
+            # Get the directory name from the prefix
+            dir_name = os.path.basename(prefix.rstrip("/"))
+            if dir_name:
+                # Create a directory marker
+                marker_path = os.path.join(save_path, dir_name)
+                os.makedirs(marker_path, exist_ok=True)
+                files_downloaded += 1
+
+            for obj in objects:
+                if cancel_requested:
+                    return False
+
+                key = obj["Key"]
+                file_size = obj["Size"]
+                
+                # Skip the directory marker
+                if key.endswith("/"):
+                    continue
+                    
+                # Get the relative path from the prefix
+                rel_path = os.path.relpath(key, prefix)
+                if rel_path == ".":  # Skip if it's the directory itself
+                    continue
+                    
+                local_path = os.path.join(save_path, dir_name, rel_path)
+
+                # Create directory structure
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+                if file_size == 0:
+                    if progress_callback:
+                        progress_callback(0, f"Downloading {rel_path}...")
+                    # Create empty file
+                    open(local_path, 'wb').close()
+                    files_downloaded += 1
+                    continue
+
+                def file_progress_callback(bytes_amount):
+                    nonlocal downloaded_size, cancel_requested
+                    if cancel_requested:
+                        raise RuntimeError("Download cancelled by user callback.")
+
+                    downloaded_size += bytes_amount
+                    if progress_callback and total_size > 0:
+                        progress = int((downloaded_size / total_size) * 100)
+                        progress = max(0, min(100, progress))
+                        if not progress_callback(progress, f"Downloading {rel_path}..."):
+                            cancel_requested = True
+                            raise RuntimeError("Download cancelled by user callback.")
+
+                config = boto3.s3.transfer.TransferConfig(use_threads=False)
+                self.s3_client.download_file(
+                    bucket,
+                    key,
+                    local_path,
+                    Callback=file_progress_callback,
+                    Config=config
+                )
+                files_downloaded += 1
+
+            return True
+
+        except RuntimeError as e:
+            if str(e) == "Download cancelled by user callback.":
+                self.debug_print("AWSClient: Caught cancellation exception. Download stopped.")
+                return False
+            else:
+                self.debug_print(f"AWSClient: Download failed with runtime error: {e}")
+                return False
+        except Exception as e:
+            self.debug_print(f"AWSClient: Download failed with error: {str(e)}")
+            return False 

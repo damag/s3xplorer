@@ -2,14 +2,15 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTreeView, QTableView, QPushButton, QLabel,
                              QStatusBar, QMenuBar, QMenu, QToolBar, QFileDialog,
                              QMessageBox, QGroupBox, QSplitter, QListWidget, QListWidgetItem,
-                             QTableWidget, QTableWidgetItem, QHeaderView)
+                             QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox)
 from PyQt6.QtCore import Qt, QSize, QTimer, QSettings
 from PyQt6.QtGui import QAction, QIcon
 from src.ui.auth_dialog import AuthDialog
 from src.ui.models import BucketTreeModel, ObjectTableModel, S3ObjectTreeModel
 from src.core.aws_client import AWSClient
 from src.ui.workers import (WorkerSignals, ListBucketsWorker, ListObjectsWorker,
-                           UploadWorker, DownloadWorker, DeleteWorker, WorkerManager)
+                           UploadWorker, DownloadWorker, DeleteWorker, WorkerManager,
+                           UploadDirectoryWorker, DownloadDirectoryWorker, DeleteDirectoryWorker)
 from src.ui.operations_window import OperationsWindow
 import os
 
@@ -433,7 +434,7 @@ class MainWindow(QMainWindow):
         if item_type == "directory":
             # Update the current directory label
             display_path = "/" + item_path if item_path else "/"
-            self.files_header.setText(f"Current Directory: {display_path}")
+            self.files_header.setText(f"{display_path}")
             
             # If the "Root" directory is selected, show root files
             if item_name == "/" and item_path == "":
@@ -463,7 +464,7 @@ class MainWindow(QMainWindow):
                     self._add_file_to_table(obj)
     
     def handle_upload(self):
-        """Handle file upload."""
+        """Handle file or directory upload."""
         if not self.aws_client or not self.current_bucket:
             QMessageBox.warning(self, "Warning", "Please select a bucket first")
             return
@@ -478,6 +479,35 @@ class MainWindow(QMainWindow):
             if item_type == "directory":
                 prefix = self.directory_tree_model.get_item_path(index)
         
+        # Check if a directory is selected in the tree view
+        if selected_indexes:
+            index = selected_indexes[0]
+            item_type = self.directory_tree_model.get_item_type(index)
+            if item_type == "directory":
+                # Handle directory upload
+                directory_path = QFileDialog.getExistingDirectory(self, "Select Directory to Upload")
+                if not directory_path:
+                    return
+                
+                signals = WorkerSignals()
+                signals.finished.connect(lambda: self.handle_upload_finished())
+                signals.error.connect(self.handle_worker_error)
+                signals.progress.connect(self.handle_worker_progress)
+                
+                operation_id = self.operations_window.add_operation(
+                    "Upload Directory", 
+                    f"Uploading directory {os.path.basename(directory_path)} to {self.current_bucket}",
+                    directory_path,
+                    sum(os.path.getsize(os.path.join(root, file)) 
+                        for root, _, files in os.walk(directory_path) 
+                        for file in files)
+                )
+                worker = UploadDirectoryWorker(self.aws_client, directory_path, self.current_bucket, prefix, signals)
+                self.worker_manager.start_worker(worker, operation_id)
+                self.status_bar.showMessage("Uploading directory...")
+                return
+        
+        # Handle file upload
         file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Upload")
         if not file_path:
             return
@@ -485,13 +515,11 @@ class MainWindow(QMainWindow):
         file_name = os.path.basename(file_path)
         key = prefix + file_name
         
-        # Create signals for the worker
         signals = WorkerSignals()
         signals.finished.connect(lambda: self.handle_upload_finished())
         signals.error.connect(self.handle_worker_error)
         signals.progress.connect(self.handle_worker_progress)
         
-        # Create and start the worker
         operation_id = self.operations_window.add_operation(
             "Upload", 
             f"Uploading {key} to {self.current_bucket}",
@@ -508,16 +536,49 @@ class MainWindow(QMainWindow):
         
         # Complete the Upload operation
         for operation_id, operation in self.operations_window.operations.items():
-            if operation['type'] == "Upload":
+            if operation['type'] in ["Upload", "Upload Directory"]:
                 self.operations_window.complete_operation(operation_id)
                 break
     
     def handle_download(self):
-        """Handle file download."""
+        """Handle file or directory download."""
         if not self.aws_client or not self.current_bucket:
             QMessageBox.warning(self, "Warning", "Please select a bucket first")
             return
         
+        # Check if a directory is selected in the tree view
+        selected_indexes = self.directories_tree.selectedIndexes()
+        if selected_indexes:
+            index = selected_indexes[0]
+            item_type = self.directory_tree_model.get_item_type(index)
+            if item_type == "directory":
+                # Handle directory download
+                prefix = self.directory_tree_model.get_item_path(index)
+                save_dir = QFileDialog.getExistingDirectory(self, "Select Download Directory")
+                if not save_dir:
+                    return
+                
+                signals = WorkerSignals()
+                signals.finished.connect(lambda: self.handle_download_finished(prefix))
+                signals.error.connect(lambda e, k=prefix: self.handle_worker_error(e, k))
+                signals.progress.connect(self.handle_worker_progress)
+                
+                # Calculate total size of objects in the directory
+                total_size = sum(obj["Size"] for obj in self.current_objects 
+                                if obj["Key"].startswith(prefix))
+                
+                operation_id = self.operations_window.add_operation(
+                    "Download Directory", 
+                    f"Downloading directory {prefix} from {self.current_bucket}",
+                    save_dir,
+                    total_size
+                )
+                worker = DownloadDirectoryWorker(self.aws_client, self.current_bucket, prefix, save_dir, signals)
+                self.worker_manager.start_worker(worker, operation_id)
+                self.status_bar.showMessage(f"Downloading directory {prefix}...")
+                return
+        
+        # Handle file download
         selected_rows = self.files_list.selectedItems()
         if not selected_rows:
             QMessageBox.warning(self, "Warning", "Please select files to download")
@@ -540,13 +601,11 @@ class MainWindow(QMainWindow):
             
             save_path = os.path.join(save_dir, file_name)
             
-            # Create signals for the worker
             signals = WorkerSignals()
             signals.finished.connect(lambda k=key: self.handle_download_finished(k))
             signals.error.connect(lambda e, k=key: self.handle_worker_error(e, k))
             signals.progress.connect(self.handle_worker_progress)
             
-            # Create and start the worker
             operation_id = self.operations_window.add_operation(
                 "Download", 
                 f"Downloading {key} from {self.current_bucket}",
@@ -563,7 +622,7 @@ class MainWindow(QMainWindow):
         
         # Complete the Download operation for this key
         for operation_id, operation in self.operations_window.operations.items():
-            if operation['type'] == "Download" and key in operation['status']:
+            if operation['type'] in ["Download", "Download Directory"]:
                 self.operations_window.complete_operation(operation_id)
                 break
     
@@ -573,6 +632,33 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", "Please select a bucket first")
             return
         
+        # Check if a directory is selected in the tree view
+        selected_indexes = self.directories_tree.selectedIndexes()
+        if selected_indexes:
+            index = selected_indexes[0]
+            item_type = self.directory_tree_model.get_item_type(index)
+            if item_type == "directory":
+                # Handle directory deletion
+                prefix = self.directory_tree_model.get_item_path(index)
+                dir_name = os.path.basename(prefix.rstrip("/"))
+                
+                # Count objects in the directory
+                object_count = sum(1 for obj in self.current_objects 
+                                 if obj["Key"].startswith(prefix))
+                
+                # Confirm deletion
+                reply = QMessageBox.question(
+                    self,
+                    "Confirm Delete Directory",
+                    f"Are you sure you want to delete directory '{dir_name}' and all its contents ({object_count} objects)?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                
+                if reply == QMessageBox.StandardButton.Yes:
+                    self._delete_directory(prefix)
+                return
+        
+        # Handle file deletion
         selected_rows = self.files_list.selectedItems()
         if not selected_rows:
             QMessageBox.warning(self, "Warning", "Please select files to delete")
@@ -594,6 +680,23 @@ class MainWindow(QMainWindow):
                 # Get the full key from the item's data
                 key = self.files_list.item(row, 0).data(Qt.ItemDataRole.UserRole)
                 self._delete_object(key)
+    
+    def _delete_directory(self, prefix):
+        """Delete a directory and all its contents from S3."""
+        # Create signals for the worker
+        signals = WorkerSignals()
+        signals.finished.connect(lambda: self.handle_delete_finished(prefix))
+        signals.error.connect(lambda e, k=prefix: self.handle_worker_error(e, k))
+        signals.progress.connect(self.handle_worker_progress)
+        
+        # Create and start the worker
+        operation_id = self.operations_window.add_operation(
+            "Delete Directory", 
+            f"Deleting directory {prefix} from {self.current_bucket}"
+        )
+        worker = DeleteDirectoryWorker(self.aws_client, self.current_bucket, prefix, signals)
+        self.worker_manager.start_worker(worker, operation_id)
+        self.status_bar.showMessage(f"Deleting directory {prefix}...")
     
     def _delete_object(self, key):
         """Delete a single S3 object."""
@@ -619,7 +722,7 @@ class MainWindow(QMainWindow):
         
         # Complete the Delete operation for this key
         for operation_id, operation in self.operations_window.operations.items():
-            if operation['type'] == "Delete" and key in operation['status']:
+            if operation['type'] in ["Delete", "Delete Directory"]:
                 self.operations_window.complete_operation(operation_id)
                 break
     
@@ -701,3 +804,84 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(self.settings.value("geometry"))
         if self.settings.contains("windowState"):
             self.restoreState(self.settings.value("windowState"))
+    
+    def handle_upload_directory(self):
+        """Handle directory upload."""
+        if not self.aws_client or not self.current_bucket:
+            QMessageBox.warning(self, "Warning", "Please select a bucket first")
+            return
+        
+        # Get the selected directory for upload
+        selected_indexes = self.directories_tree.selectedIndexes()
+        prefix = ""
+        
+        if selected_indexes:
+            index = selected_indexes[0]
+            item_type = self.directory_tree_model.get_item_type(index)
+            if item_type == "directory":
+                prefix = self.directory_tree_model.get_item_path(index)
+        
+        directory_path = QFileDialog.getExistingDirectory(self, "Select Directory to Upload")
+        if not directory_path:
+            return
+        
+        signals = WorkerSignals()
+        signals.finished.connect(lambda: self.handle_upload_finished())
+        signals.error.connect(self.handle_worker_error)
+        signals.progress.connect(self.handle_worker_progress)
+        
+        operation_id = self.operations_window.add_operation(
+            "Upload Directory", 
+            f"Uploading directory {os.path.basename(directory_path)} to {self.current_bucket}",
+            directory_path,
+            sum(os.path.getsize(os.path.join(root, file)) 
+                for root, _, files in os.walk(directory_path) 
+                for file in files)
+        )
+        worker = UploadDirectoryWorker(self.aws_client, directory_path, self.current_bucket, prefix, signals)
+        self.worker_manager.start_worker(worker, operation_id)
+        self.status_bar.showMessage("Uploading directory...")
+    
+    def handle_download_directory(self):
+        """Handle directory download."""
+        if not self.aws_client or not self.current_bucket:
+            QMessageBox.warning(self, "Warning", "Please select a bucket first")
+            return
+        
+        # Get the selected directory for download
+        selected_indexes = self.directories_tree.selectedIndexes()
+        if not selected_indexes:
+            QMessageBox.warning(self, "Warning", "Please select a directory to download")
+            return
+        
+        index = selected_indexes[0]
+        item_type = self.directory_tree_model.get_item_type(index)
+        if item_type != "directory":
+            QMessageBox.warning(self, "Warning", "Please select a directory to download")
+            return
+        
+        prefix = self.directory_tree_model.get_item_path(index)
+        save_dir = QFileDialog.getExistingDirectory(self, "Select Download Directory")
+        if not save_dir:
+            return
+        
+        # Create signals for the worker
+        signals = WorkerSignals()
+        signals.finished.connect(lambda: self.handle_download_finished(prefix))
+        signals.error.connect(lambda e, k=prefix: self.handle_worker_error(e, k))
+        signals.progress.connect(self.handle_worker_progress)
+        
+        # Calculate total size of objects in the directory
+        total_size = sum(obj["Size"] for obj in self.current_objects 
+                        if obj["Key"].startswith(prefix))
+        
+        # Create and start the worker
+        operation_id = self.operations_window.add_operation(
+            "Download Directory", 
+            f"Downloading directory {prefix} from {self.current_bucket}",
+            save_dir,
+            total_size
+        )
+        worker = DownloadDirectoryWorker(self.aws_client, self.current_bucket, prefix, save_dir, signals)
+        self.worker_manager.start_worker(worker, operation_id)
+        self.status_bar.showMessage(f"Downloading directory {prefix}...")
