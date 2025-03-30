@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTreeView, QTableView, QPushButton, QLabel,
                              QStatusBar, QMenuBar, QMenu, QToolBar, QFileDialog,
                              QMessageBox, QGroupBox, QSplitter, QListWidget, QListWidgetItem,
-                             QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox)
+                             QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QDialog, QLineEdit, QGridLayout)
 from PyQt6.QtCore import Qt, QSize, QTimer, QSettings, QModelIndex
 from PyQt6.QtGui import QAction, QIcon
 from src.ui.auth_dialog import AuthDialog
@@ -142,6 +142,8 @@ class MainWindow(QMainWindow):
         self.directories_tree.setIndentation(20)
         self.directories_tree.setExpandsOnDoubleClick(True)
         self.directories_tree.clicked.connect(self.on_directory_selected)
+        self.directories_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.directories_tree.customContextMenuRequested.connect(self.show_directories_context_menu)
         directories_layout.addWidget(self.directories_tree)
         
         # Files panel
@@ -160,6 +162,8 @@ class MainWindow(QMainWindow):
         self.files_list.setHorizontalHeaderLabels(["Name", "Size", "Modified"])
         self.files_list.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.files_list.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.files_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.files_list.customContextMenuRequested.connect(self.show_files_context_menu)
         
         # Set column widths
         self.files_list.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -1182,3 +1186,173 @@ class MainWindow(QMainWindow):
         
         # Not found in this branch
         return False
+
+    def show_files_context_menu(self, position):
+        """Show context menu for files list."""
+        if not self.aws_client or not self.current_bucket:
+            return
+            
+        menu = QMenu()
+        
+        # Get selected rows
+        selected_rows = self.files_list.selectedItems()
+        if not selected_rows:
+            return
+            
+        # Get unique rows (since we're selecting cells)
+        rows = set(item.row() for item in selected_rows)
+        
+        # Add menu items
+        upload_action = menu.addAction("Upload")
+        upload_action.triggered.connect(self.handle_upload_file)
+        
+        download_action = menu.addAction("Download")
+        download_action.triggered.connect(self.handle_download_file)
+        
+        delete_action = menu.addAction("Delete")
+        delete_action.triggered.connect(self.handle_delete_object)
+        
+        menu.addSeparator()
+        
+        # Only show URL and Properties for single file selection
+        if len(rows) == 1:
+            row = rows.pop()
+            key = self.files_list.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            
+            generate_url_action = menu.addAction("Generate URL")
+            generate_url_action.triggered.connect(lambda: self.handle_generate_url(key))
+            
+            properties_action = menu.addAction("Properties")
+            properties_action.triggered.connect(lambda: self.handle_show_properties(key))
+        
+        # Show the menu at the cursor position
+        menu.exec(self.files_list.mapToGlobal(position))
+    
+    def show_directories_context_menu(self, position):
+        """Show context menu for directories tree."""
+        if not self.aws_client or not self.current_bucket:
+            return
+            
+        menu = QMenu()
+        
+        # Get selected index
+        index = self.directories_tree.indexAt(position)
+        if not index.isValid():
+            return
+            
+        item_type = self.directory_tree_model.get_item_type(index)
+        if item_type != "directory":
+            return
+            
+        # Add menu items
+        upload_action = menu.addAction("Upload")
+        upload_action.triggered.connect(self.handle_upload_directory)
+        
+        download_action = menu.addAction("Download")
+        download_action.triggered.connect(self.handle_download_directory)
+        
+        delete_action = menu.addAction("Delete")
+        delete_action.triggered.connect(self.handle_delete_directory)
+        
+        # Show the menu at the cursor position
+        menu.exec(self.directories_tree.mapToGlobal(position))
+    
+    def handle_generate_url(self, key):
+        """Generate a pre-signed URL for the object."""
+        if not self.aws_client or not self.current_bucket:
+            return
+            
+        try:
+            url = self.aws_client.generate_presigned_url(self.current_bucket, key)
+            
+            # Create a dialog to show the URL
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Pre-signed URL")
+            dialog.setMinimumWidth(500)
+            
+            layout = QVBoxLayout()
+            
+            # Add URL text
+            url_label = QLabel("URL:")
+            layout.addWidget(url_label)
+            
+            url_text = QLineEdit()
+            url_text.setText(url)
+            url_text.setReadOnly(True)
+            layout.addWidget(url_text)
+            
+            # Add copy button
+            copy_button = QPushButton("Copy URL")
+            copy_button.clicked.connect(lambda: QApplication.clipboard().setText(url))
+            layout.addWidget(copy_button)
+            
+            # Add close button
+            close_button = QPushButton("Close")
+            close_button.clicked.connect(dialog.close)
+            layout.addWidget(close_button)
+            
+            dialog.setLayout(layout)
+            dialog.exec()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to generate URL: {str(e)}")
+    
+    def handle_show_properties(self, key):
+        """Show object properties dialog."""
+        if not self.aws_client or not self.current_bucket:
+            return
+            
+        try:
+            # Get object metadata
+            metadata = self.aws_client.get_object_metadata(self.current_bucket, key)
+            
+            # Create a dialog to show properties
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Object Properties")
+            dialog.setMinimumWidth(400)
+            
+            layout = QVBoxLayout()
+            
+            # Add properties in a grid layout
+            grid = QGridLayout()
+            
+            # Key
+            grid.addWidget(QLabel("Key:"), 0, 0)
+            grid.addWidget(QLabel(key), 0, 1)
+            
+            # Size
+            grid.addWidget(QLabel("Size:"), 1, 0)
+            grid.addWidget(QLabel(self.format_size(metadata.get('ContentLength', 0))), 1, 1)
+            
+            # Last Modified
+            grid.addWidget(QLabel("Last Modified:"), 2, 0)
+            last_modified_str = metadata.get('last_modified', '')
+            formatted_date = ""
+            if last_modified_str:
+                try:
+                    last_modified_dt = datetime.fromisoformat(last_modified_str)
+                    formatted_date = last_modified_dt.strftime("%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    formatted_date = last_modified_str # Fallback to original string if parsing fails
+            grid.addWidget(QLabel(formatted_date), 2, 1)
+            
+            # Storage Class
+            grid.addWidget(QLabel("Storage Class:"), 3, 0)
+            grid.addWidget(QLabel(metadata.get('StorageClass', 'STANDARD')), 3, 1)
+            
+            # Content Type
+            grid.addWidget(QLabel("Content Type:"), 4, 0)
+            grid.addWidget(QLabel(metadata.get('ContentType', '')), 4, 1)
+            
+            layout.addLayout(grid)
+            
+            # Add close button
+            close_button = QPushButton("Close")
+            close_button.clicked.connect(dialog.close)
+            layout.addWidget(close_button)
+            
+            dialog.setLayout(layout)
+            dialog.exec()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to get object properties: {str(e)}")

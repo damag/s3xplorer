@@ -1061,4 +1061,31 @@ class AWSClient(QObject):
                     message=f"Failed to delete objects: {str(e)}",
                     operation="_delete_all_objects",
                     details={'bucket': bucket_name}
+                )
+    
+    def generate_presigned_url(self, bucket: str, key: str, expiration: int = 3600) -> str:
+        """Generate a presigned URL for an S3 object."""
+        try:
+            logger.info(f"Generating presigned URL for {bucket}/{key}")
+            
+            response = self._execute_with_retry(
+                self.s3_client.generate_presigned_url,
+                'get_object',
+                Params={'Bucket': bucket, 'Key': key},
+                ExpiresIn=expiration,
+                operation_name="generate_presigned_url"
+            )
+            
+            logger.info(f"Successfully generated presigned URL for {bucket}/{key}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error generating presigned URL for {bucket}/{key}: {str(e)}")
+            if isinstance(e, AWSError):
+                raise
+            else:
+                raise AWSError(
+                    message=f"Failed to generate URL: {str(e)}",
+                    operation="generate_presigned_url",
+                    details={'bucket': bucket, 'key': key, 'expiration': expiration}
                 ) 
