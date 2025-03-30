@@ -389,15 +389,18 @@ class MainWindow(QMainWindow):
         # This is much faster for large buckets and allows user to browse on demand
         worker = ListObjectsWorker(self.aws_client, bucket_name, recursive=False)
         
+        # Store the operation_id with the worker for later reference
+        worker.operation_id = operation_id
+        
         # Connect signals
-        worker.signals.data.connect(self.handle_objects_data)
+        worker.signals.data.connect(lambda data: self.handle_objects_data(data, operation_id))
         worker.signals.error.connect(self.handle_worker_error)
         worker.signals.progress.connect(self.handle_worker_progress)
         
         self.worker_manager.start_worker(worker, operation_id)
         self.status_bar.showMessage(f"Loading objects in {bucket_name}...")
     
-    def handle_objects_data(self, objects_data):
+    def handle_objects_data(self, objects_data, operation_id=None):
         """Handle the objects data from the worker."""
         # Convert from API response format to UI expected format
         objects = []
@@ -450,10 +453,16 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Found {len(actual_objects)} objects in {self.current_bucket}")
         
         # Complete the List Objects operation
-        for operation_id, operation in self.operations_window.operations.items():
-            if operation['type'] == "List Objects":
-                self.operations_window.complete_operation(operation_id)
-                break
+        if operation_id and operation_id in self.operations_window.operations:
+            # Make sure we update progress to 100% before completing
+            self.operations_window.update_progress(operation_id, 100)
+            self.operations_window.complete_operation(operation_id)
+        else:
+            # Fallback to finding the first List Objects operation if no specific ID was provided
+            for op_id, operation in self.operations_window.operations.items():
+                if operation['type'] == "List Objects":
+                    self.operations_window.complete_operation(op_id)
+                    break
     
     def _add_file_to_table(self, obj):
         """Add a file to the files table."""
@@ -1061,15 +1070,18 @@ class MainWindow(QMainWindow):
         # Use non-recursive mode but with the specific prefix
         worker = ListObjectsWorker(self.aws_client, self.current_bucket, prefix, recursive=False)
         
+        # Store the operation_id with the worker for later reference
+        worker.operation_id = operation_id
+        
         # Connect signals
-        worker.signals.data.connect(self.handle_directory_contents)
+        worker.signals.data.connect(lambda data: self.handle_directory_contents(data, operation_id))
         worker.signals.error.connect(self.handle_worker_error)
         worker.signals.progress.connect(self.handle_worker_progress)
         
         self.worker_manager.start_worker(worker, operation_id)
         self.status_bar.showMessage(f"Loading directory: {prefix}...")
     
-    def handle_directory_contents(self, objects_data):
+    def handle_directory_contents(self, objects_data, operation_id=None):
         """Handle directory contents data from focused directory listing."""
         # Convert from API response format to UI expected format
         objects = []
@@ -1131,13 +1143,19 @@ class MainWindow(QMainWindow):
             current_prefix += "/"
         self.update_files_list(current_prefix)
         
-        # Complete the operation
-        for operation_id, operation in self.operations_window.operations.items():
-            if operation['type'] == "List Directory":
-                # Make sure we update progress to 100% before completing
-                self.operations_window.update_progress(operation_id, 100)
-                self.operations_window.complete_operation(operation_id)
-                break
+        # Complete the operation using the provided operation_id
+        if operation_id and operation_id in self.operations_window.operations:
+            # Make sure we update progress to 100% before completing
+            self.operations_window.update_progress(operation_id, 100)
+            self.operations_window.complete_operation(operation_id)
+        else:
+            # Fallback to finding the first List Directory operation if no specific ID was provided
+            for op_id, operation in self.operations_window.operations.items():
+                if operation['type'] == "List Directory":
+                    # Make sure we update progress to 100% before completing
+                    self.operations_window.update_progress(op_id, 100)
+                    self.operations_window.complete_operation(op_id)
+                    break
     
     def _select_directory_in_tree(self, directory_path):
         """Select a directory in the tree view."""

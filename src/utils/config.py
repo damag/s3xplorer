@@ -36,7 +36,11 @@ class Config:
             'remember_credentials': True,
             'auto_refresh_interval': 0,  # 0 means disabled
             'show_hidden_objects': False,
-            'confirm_deletions': True
+            'confirm_deletions': True,
+            'completed_operations_ttl': 5,  # Auto-remove completed operations after 5 seconds
+            'operations_auto_cleanup': 1,  # Check for operations to clean up every 1 minute
+            'auto_cleanup_enabled': True,  # Enable auto cleanup
+            'auto_cleanup_age': 1  # Auto-cleanup operations older than 1 minute
         }
         
         # Ensure config directory exists
