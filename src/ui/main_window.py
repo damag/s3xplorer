@@ -583,7 +583,16 @@ class MainWindow(QMainWindow):
             directory_path,
             0  # Size will be calculated by the worker
         )
-        worker = UploadDirectoryWorker(self.aws_client, directory_path, self.current_bucket, current_dir)
+        
+        # Pass empty string as prefix when at the root level
+        # This avoids the UploadDirectoryWorker from creating a leading slash
+        prefix = ""
+        
+        # Only add the current directory to the prefix if we're not at the root
+        if current_dir:
+            prefix = current_dir
+        
+        worker = UploadDirectoryWorker(self.aws_client, directory_path, self.current_bucket, prefix)
         
         # Connect signals
         worker.signals.finished.connect(lambda: self.handle_upload_finished())

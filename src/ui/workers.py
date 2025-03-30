@@ -332,8 +332,13 @@ class UploadDirectoryWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            # Create a directory marker in S3 (empty object with trailing slash)
-            dir_key = f"{self.prefix.rstrip('/')}/{self.dir_name}/"
+            # Create a directory key that works correctly for both root and non-root uploads
+            if self.prefix:
+                # If we have a prefix (not in root), append the directory name with proper path handling
+                dir_key = f"{self.prefix.rstrip('/')}/{self.dir_name}/"
+            else:
+                # If we're in the root (no prefix), just use the directory name directly
+                dir_key = f"{self.dir_name}/"
             
             # Start uploading files
             self.signals.progress.emit(0, f"Uploading {self.total_files} files ({self._format_size(self.total_size)})...")
