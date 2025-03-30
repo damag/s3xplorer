@@ -49,12 +49,13 @@ class AuthDialog(QDialog):
         self.sso_code_label.hide()
         code_layout.addWidget(self.sso_code_label)
         code_group.setLayout(code_layout)
+        code_group.hide()  # Hide the entire group by default
         sso_layout.addWidget(code_group)
         
         # Add form layout for SSO inputs
         sso_form = QFormLayout()
         self.start_url_input = QLineEdit()
-        self.sso_region_input = QLineEdit("eu-west-1")  # Set default region
+        self.sso_region_input = QLineEdit()  # Removed default region
         self.account_id_input = QLineEdit()
         self.role_name_input = QLineEdit()
         
@@ -72,7 +73,7 @@ class AuthDialog(QDialog):
         self.access_key_input = QLineEdit()
         self.secret_key_input = QLineEdit()
         self.secret_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.region_input = QLineEdit("us-east-1")
+        self.region_input = QLineEdit()  # Removed default region
         
         access_key_layout.addRow("Access Key:", self.access_key_input)
         access_key_layout.addRow("Secret Key:", self.secret_key_input)
@@ -169,7 +170,16 @@ class AuthDialog(QDialog):
         print(f"Received authorization code: {code}")  # Debug print
         self.sso_code_label.setText(code)
         self.sso_code_label.show()
-        self.sso_code_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2196F3;")
+        self.sso_code_label.parent().show()  # Show the parent QGroupBox
+        self.sso_code_label.setStyleSheet("""
+            font-size: 24px;
+            font-weight: bold;
+            color: #2196F3;
+            padding: 10px;
+            background-color: #E3F2FD;
+            border: 2px solid #2196F3;
+            border-radius: 5px;
+        """)
         # Force the dialog to update
         self.sso_code_label.update()
         self.update()

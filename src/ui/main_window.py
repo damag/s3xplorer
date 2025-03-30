@@ -39,6 +39,12 @@ class MainWindow(QMainWindow):
         # Restore window geometry
         self.settings = QSettings("S3xplorer", "S3xplorer")
         self.restore_geometry()
+        
+        # Show the main window first
+        self.show()
+        
+        # Show authentication dialog on startup
+        QTimer.singleShot(100, self.handle_connect)  # Small delay to ensure window is visible
     
     def setup_ui(self):
         """Setup the main window UI."""
@@ -48,6 +54,12 @@ class MainWindow(QMainWindow):
         # Create toolbar
         toolbar = QHBoxLayout()
         toolbar.setSpacing(10)
+        
+        # Add connect button
+        connect_button = QPushButton("Connect")
+        connect_button.setIcon(QIcon.fromTheme("network-connect"))
+        connect_button.clicked.connect(self.handle_connect)
+        toolbar.addWidget(connect_button)
         
         # Add refresh button
         refresh_button = QPushButton("Refresh")
@@ -240,9 +252,6 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        # Create menu bar
-        self.create_menu_bar()
-        
         # Create status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -260,45 +269,6 @@ class MainWindow(QMainWindow):
                 return f"{size:.2f} {unit}"
             size /= 1024
         return f"{size:.2f} PB"
-    
-    def create_menu_bar(self):
-        menubar = self.menuBar()
-        
-        # File menu
-        file_menu = menubar.addMenu("File")
-        
-        connect_action = QAction("Connect to AWS", self)
-        connect_action.setShortcut("Ctrl+N")
-        connect_action.triggered.connect(self.handle_connect)
-        file_menu.addAction(connect_action)
-        
-        file_menu.addSeparator()
-        
-        exit_action = QAction("Exit", self)
-        exit_action.setShortcut("Ctrl+Q")
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-        
-        # Edit menu
-        edit_menu = menubar.addMenu("Edit")
-        
-        refresh_action = QAction("Refresh", self)
-        refresh_action.setShortcut("F5")
-        refresh_action.triggered.connect(self.handle_refresh)
-        edit_menu.addAction(refresh_action)
-        
-        # View menu
-        view_menu = menubar.addMenu("View")
-        
-        show_hidden_action = QAction("Show Hidden Files", self)
-        show_hidden_action.setCheckable(True)
-        view_menu.addAction(show_hidden_action)
-        
-        # Add Operations Window action
-        show_operations_action = QAction("Show Operations", self)
-        show_operations_action.setShortcut("Ctrl+O")
-        show_operations_action.triggered.connect(self.toggle_operations_window)
-        view_menu.addAction(show_operations_action)
     
     def create_toolbar(self):
         toolbar = QToolBar()
