@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QProgressBar, QTableWidget, QTableWidgetItem,
                              QHeaderView, QTextBrowser, QSplitter, QDialog, QMessageBox)
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QDateTime, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QDateTime, QSize, QMetaObject, Q_ARG
 from PyQt6.QtGui import QIcon, QColor
 import uuid
 import os
@@ -193,12 +193,6 @@ class OperationsWindow(QWidget):
         # Completion timers
         self.completed_timers = {}
         
-        # Speed tracking
-        self.speed_tracking = {}
-        self.speed_update_timer = QTimer(self)
-        self.speed_update_timer.timeout.connect(self.update_speeds)
-        self.speed_update_timer.start(1000)  # Update every second
-        
         # Auto-cleanup completed operations
         self.auto_cleanup_timer = QTimer(self)
         self.auto_cleanup_timer.timeout.connect(self.auto_cleanup)
@@ -308,13 +302,6 @@ class OperationsWindow(QWidget):
             'error': None
         }
         
-        # Initialize speed tracking
-        self.speed_tracking[operation_id] = {
-            'last_update_time': time.time(),
-            'last_progress': 0,
-            'speed': 0
-        }
-        
         # Update counters
         self.operation_counters['active'] += 1
         self.update_stats()
@@ -323,78 +310,99 @@ class OperationsWindow(QWidget):
         
         return operation_id
     
-    def update_progress(self, operation_id: str, progress: int, status: str = None):
-        """Update progress and optionally status for an operation."""
+    def update_progress(self, operation_id: str, progress: int, status: str = None, speed: float = 0.0):
+        """Update progress, status, and speed for an operation."""
         if operation_id not in self.operations:
             logger.warning(f"Attempted to update unknown operation: {operation_id}")
             return
-            
+        
+        # Import necessary Qt classes
+        from PyQt6.QtCore import QThread
+        from PyQt6.QtWidgets import QApplication
+        
+        # Verify we are running in the main GUI thread
+        if QApplication.instance().thread() != QThread.currentThread():
+            logger.error("CRITICAL: update_progress is NOT running in the main GUI thread!")
+            return
+        # else:
+            # logger.debug("update_progress is running in the main GUI thread (as expected)") # Keep commented unless debugging
+
+        # # Directly print to console for debugging - REMOVED
+        # print(f"PROGRESS UPDATE: op_id={operation_id}, progress={progress}, status={status}, speed={speed:.2f} B/s")
+        
+        # Log the progress update for debugging
+        logger.debug(f"Progress update received: {operation_id} - {progress}% - {status} - Speed: {speed:.2f} B/s")
+        
         operation = self.operations[operation_id]
         operation['progress'] = progress
         
         if status:
             operation['status'] = status
+            
+            # Update status text
             status_item = self.operations_table.item(operation['row'], 5)
             if status_item:
                 status_item.setText(status)
+                
+            # Extract file size from status if available (for initial size setting)
+            if operation['file_size'] is None or operation['file_size'] == 0:
+                 if '(' in status and ')' in status:
+                    try:
+                        size_part = status.split('(')[1].split(')')[0]
+                        if 'B' in size_part and not '%' in size_part: 
+                            size_bytes = self._parse_size_to_bytes(size_part)
+                            if size_bytes > 0:
+                                operation['file_size'] = size_bytes
+                                logger.debug(f"Updated operation {operation_id} file size to {size_bytes} bytes from status")
+                                size_item = self.operations_table.item(operation['row'], 2)
+                                if size_item:
+                                    size_item.setText(self.format_size(size_bytes))
+                    except Exception as e:
+                        logger.debug(f"Failed to extract file size from status: {e}")
         
         # Update progress bar
         progress_bar = self.operations_table.cellWidget(operation['row'], 4)
         if progress_bar:
+            # # Print directly to console for debugging - REMOVED
+            # print(f"Updating progress bar to {progress}%")
             progress_bar.setValue(progress)
+            progress_bar.repaint() 
         
-        # Update speed tracking
-        current_time = time.time()
-        track_info = self.speed_tracking.get(operation_id, {})
-        last_time = track_info.get('last_update_time', current_time)
-        last_progress = track_info.get('last_progress', 0)
-        
-        # Only update if time has passed
-        if current_time > last_time and operation.get('file_size'):
-            # Calculate bytes transferred since last update
-            last_bytes = (last_progress / 100.0) * operation['file_size']
-            current_bytes = (progress / 100.0) * operation['file_size']
-            bytes_delta = current_bytes - last_bytes
+        # Update speed display using the provided speed value
+        speed_item = self.operations_table.item(operation['row'], 3)
+        if speed_item:
+            speed_text = self.format_speed(speed) if speed > 0 else ""
+            speed_item.setText(speed_text)
+            # # Print directly to console for debugging - REMOVED
+            # print(f"Speed set from worker: {speed_text}")
+            logger.debug(f"Speed set from worker: {speed_text}")
             
-            # Calculate time delta
-            time_delta = current_time - last_time
-            
-            if time_delta > 0:
-                # Calculate speed in bytes per second
-                speed = bytes_delta / time_delta
-                track_info['speed'] = speed
-                
-                # Update speed display
-                speed_item = self.operations_table.item(operation['row'], 3)
-                if speed_item:
-                    speed_item.setText(self.format_speed(speed))
-        
-        # Update tracking info
-        track_info['last_update_time'] = current_time
-        track_info['last_progress'] = progress
-        self.speed_tracking[operation_id] = track_info
+        # # Print directly to console for debugging - REMOVED
+        # print(f"Completed progress update for operation {operation_id}")
     
-    def update_speeds(self):
-        """Update all operation speeds."""
-        current_time = time.time()
-        
-        for operation_id, operation in self.operations.items():
-            # Skip completed operations
-            if operation.get('state') != 'active':
-                continue
+    def _parse_size_to_bytes(self, size_string: str) -> int:
+        """Parse a size string like '10.5 MB' to bytes."""
+        try:
+            parts = size_string.split()
+            if len(parts) != 2:
+                return 0
                 
-            # Skip operations without file size
-            if not operation.get('file_size'):
-                continue
-                
-            track_info = self.speed_tracking.get(operation_id, {})
-            last_time = track_info.get('last_update_time', current_time)
+            value = float(parts[0])
+            unit = parts[1].upper()
             
-            # If more than 2 seconds have passed without an update, show 0 speed
-            if current_time - last_time > 2:
-                speed_item = self.operations_table.item(operation['row'], 3)
-                if speed_item:
-                    speed_item.setText("")
+            multipliers = {
+                'B': 1,
+                'KB': 1024,
+                'MB': 1024 * 1024,
+                'GB': 1024 * 1024 * 1024,
+                'TB': 1024 * 1024 * 1024 * 1024
+            }
+            
+            if unit in multipliers:
+                return int(value * multipliers[unit])
+            return 0
+        except Exception:
+            return 0
     
     def complete_operation(self, operation_id: str, success: bool = True, error_message: str = None):
         """Mark an operation as completed or failed."""
@@ -554,10 +562,6 @@ class OperationsWindow(QWidget):
         if operation_id in self.completed_timers:
             self.completed_timers[operation_id].stop()
             del self.completed_timers[operation_id]
-            
-        # Clean up speed tracking
-        if operation_id in self.speed_tracking:
-            del self.speed_tracking[operation_id]
         
         # Remove from operations dict
         del self.operations[operation_id]

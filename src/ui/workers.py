@@ -1,4 +1,4 @@
-from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
+from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QTimer
 from typing import List, Dict, Any, Optional, Callable
 import os
 import time
@@ -16,7 +16,7 @@ class WorkerSignals(QObject):
     started = pyqtSignal()
     finished = pyqtSignal()
     error = pyqtSignal(str, object)  # error message and exception object
-    progress = pyqtSignal(int, str)  # progress value and status message
+    progress = pyqtSignal(str, int, str, float)  # operation_id, progress value, status message, speed
     data = pyqtSignal(object)  # generic data signal
     success = pyqtSignal(str)  # success message
 
@@ -36,17 +36,21 @@ class WorkerManager(QObject):
     def start_worker(self, worker, worker_id=None):
         """Start a worker in the thread pool."""
         if worker_id is None:
-            worker_id = str(time.time())
-            
-        # Store the worker reference
+            # If no ID provided, use the worker's default or generate one
+            worker_id = getattr(worker, 'operation_id', str(time.time()))
+        else:
+            # Assign the provided operation_id to the worker instance
+            worker.operation_id = worker_id
+
+        # Store the worker reference using the assigned ID
         self.active_workers[worker_id] = worker
         
         # Connect cleanup signal
-        worker.signals.finished.connect(lambda: self._cleanup_worker(worker_id))
-        worker.signals.error.connect(lambda msg, exc: self._cleanup_worker(worker_id))
+        worker.signals.finished.connect(lambda assigned_id=worker_id: self._cleanup_worker(assigned_id))
+        worker.signals.error.connect(lambda msg, exc, assigned_id=worker_id: self._cleanup_worker(assigned_id))
         
         # Start the worker
-        logger.info(f"Starting worker {worker_id}")
+        logger.info(f"Starting worker {worker_id} (Operation ID: {worker.operation_id})")
         worker.signals.started.emit()
         self.thread_pool.start(worker)
         
@@ -58,15 +62,21 @@ class WorkerManager(QObject):
             logger.info(f"Cancelling worker {worker_id}")
             worker = self.active_workers[worker_id]
             worker.cancel()
+            # Also attempt to cancel any underlying AWS operations if applicable
+            if hasattr(worker, 'aws_client') and hasattr(worker.aws_client, 'cancel_download'):
+                if isinstance(worker, DownloadWorker) or isinstance(worker, DownloadDirectoryWorker):
+                     worker.aws_client.cancel_download()
             return True
         return False
     
     def cancel_all_workers(self):
         """Cancel all active workers."""
         logger.info(f"Cancelling all workers ({len(self.active_workers)} active)")
-        for worker_id, worker in list(self.active_workers.items()):
-            worker.cancel()
-        return len(self.active_workers)
+        cancelled_count = 0
+        for worker_id in list(self.active_workers.keys()):
+            if self.cancel_worker(worker_id):
+                 cancelled_count += 1
+        return cancelled_count
     
     def get_active_workers(self):
         """Get the number of active workers."""
@@ -76,6 +86,15 @@ class WorkerManager(QObject):
         """Remove a worker from the active workers list."""
         if worker_id in self.active_workers:
             logger.info(f"Cleaning up worker {worker_id}")
+            # Ensure the operation is marked completed/failed in the UI if not already
+            # This can happen if the worker finishes before the UI gets the final signal
+            # (Uncomment if needed, but might cause issues if called twice)
+            # if self.parent() and hasattr(self.parent(), 'operations_window'):
+            #    op_window = self.parent().operations_window
+            #    if worker_id in op_window.operations and op_window.operations[worker_id]['state'] == 'active':
+            #        logger.warning(f"Worker {worker_id} cleaned up while still marked active in UI.")
+                    # op_window.complete_operation(worker_id, success=False, error_message="Worker cleaned up unexpectedly")
+
             del self.active_workers[worker_id]
 
 class BaseWorker(QRunnable):
@@ -85,7 +104,8 @@ class BaseWorker(QRunnable):
         self.aws_client = aws_client
         self.signals = WorkerSignals()
         self._is_cancelled = False
-        self.operation_id = str(time.time())
+        # operation_id will now be set by WorkerManager
+        self.operation_id = None 
     
     def run(self):
         """This method should be overridden by subclasses."""
@@ -126,7 +146,7 @@ class ListBucketsWorker(BaseWorker):
             if self.is_cancelled():
                 return
                 
-            self.signals.progress.emit(0, "Listing buckets...")
+            self.signals.progress.emit(self.operation_id, 0, "Listing buckets...", 0.0)
             
             buckets = self.aws_client.list_buckets()
             
@@ -134,7 +154,7 @@ class ListBucketsWorker(BaseWorker):
                 return
                 
             self.signals.data.emit(buckets)
-            self.signals.progress.emit(100, "Buckets listed successfully")
+            self.signals.progress.emit(self.operation_id, 100, "Buckets listed successfully", 0.0)
             self.signals.success.emit(f"Found {len(buckets)} buckets")
             self.signals.finished.emit()
             
@@ -156,7 +176,7 @@ class ListObjectsWorker(BaseWorker):
                 return
             
             status_msg = f"Listing objects in {self.bucket}" + (f" with prefix: {self.prefix}" if self.prefix else "...")
-            self.signals.progress.emit(0, status_msg)
+            self.signals.progress.emit(self.operation_id, 0, status_msg, 0.0)
             
             result = self.aws_client.list_objects(self.bucket, self.prefix, recursive=self.recursive)
             
@@ -168,7 +188,7 @@ class ListObjectsWorker(BaseWorker):
             prefixes = result.get('prefixes', [])
             
             self.signals.data.emit(result)
-            self.signals.progress.emit(100, f"Listed {len(objects)} objects and {len(prefixes)} directories")
+            self.signals.progress.emit(self.operation_id, 100, f"Listed {len(objects)} objects and {len(prefixes)} directories", 0.0)
             self.signals.success.emit(f"Found {len(objects)} objects and {len(prefixes)} directories")
             self.signals.finished.emit()
             
@@ -184,6 +204,11 @@ class UploadWorker(BaseWorker):
         self.key = key
         self.extra_args = extra_args or {}
         self.status = f"Uploading {os.path.basename(file_path)} to {bucket}/{key}"
+        self.uploaded_bytes = 0
+        self.file_size = 0
+        self.last_progress_value = 0
+        self.start_time = time.time()
+        self.last_reported_time = time.time()
 
     def run(self):
         """Upload a file to S3."""
@@ -191,21 +216,54 @@ class UploadWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(0, self.status)
+            # Initial progress without speed
+            self.signals.progress.emit(self.operation_id, 0, self.status, 0.0)
             
             # Get file info for logging
             file_info = file_service.get_file_info(self.file_path)
-            file_size = file_info.get('size', 0)
+            self.file_size = file_info.get('size', 0)
             
-            # Use the AWS client's upload_file method with progress callback
-            def progress_callback(progress):
+            # Show file size in status
+            size_status = f"{self.status} ({self.aws_client.format_size(self.file_size)})"
+            self.signals.progress.emit(self.operation_id, 0, size_status, 0.0)
+            
+            logger.debug(f"[UPLOAD] Starting upload with file_size: {self.file_size}")
+            self.start_time = time.time()
+            self.last_reported_time = self.start_time
+            
+            # Progress callback
+            def progress_callback(bytes_amount):
                 if self.is_cancelled():
                     return False
-                self.signals.progress.emit(progress, self.status)
+                
+                self.uploaded_bytes += bytes_amount
+                
+                # Calculate progress percentage
+                if self.file_size > 0:
+                    current_time = time.time()
+                    progress = min(99, int((self.uploaded_bytes * 100) / self.file_size))
+                    
+                    # Only emit if progress has changed or time threshold passed
+                    elapsed = current_time - self.last_reported_time
+                    if progress != self.last_progress_value and elapsed >= 0.2:
+                        self.last_progress_value = progress
+                        
+                        # Calculate average speed
+                        speed = 0.0
+                        total_elapsed = current_time - self.start_time
+                        if total_elapsed > 0:
+                             speed = self.uploaded_bytes / total_elapsed
+                        self.last_reported_time = current_time
+                        
+                        # Emit progress update (status string no longer includes percentage)
+                        status_msg = f"{self.status}"
+                        logger.debug(f"[UPLOAD] Emitting progress: {progress}% - Speed: {speed:.2f} B/s")
+                        self.signals.progress.emit(self.operation_id, progress, status_msg, speed)
+                
                 return True
             
             # Upload the file
-            self.aws_client.upload_file(
+            success = self.aws_client.upload_file(
                 self.file_path, 
                 self.bucket, 
                 self.key,
@@ -213,11 +271,12 @@ class UploadWorker(BaseWorker):
                 progress_callback=progress_callback
             )
             
-            if self.is_cancelled():
+            if self.is_cancelled() or not success:
                 return
             
-            self.signals.progress.emit(100, self.status)
-            self.signals.success.emit(f"Uploaded {file_size} bytes to {self.bucket}/{self.key}")
+            # Ensure final progress is 100%, speed is irrelevant now
+            self.signals.progress.emit(self.operation_id, 100, f"{self.status} (100%)", 0.0)
+            self.signals.success.emit(f"Uploaded {self.file_size} bytes to {self.bucket}/{self.key}")
             self.signals.finished.emit()
             
         except Exception as e:
@@ -231,6 +290,11 @@ class DownloadWorker(BaseWorker):
         self.key = key
         self.save_path = save_path
         self.status = f"Downloading {key} from {bucket}"
+        self.downloaded_bytes = 0
+        self.file_size = 0
+        self.last_progress_value = 0
+        self.start_time = time.time()
+        self.last_reported_time = time.time()
 
     def run(self):
         """Download a file from S3."""
@@ -238,13 +302,54 @@ class DownloadWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(0, self.status)
+            # Initial progress without speed
+            self.signals.progress.emit(self.operation_id, 0, self.status, 0.0)
             
-            # Use the AWS client's download_file method with progress callback
-            def progress_callback(progress):
+            # Get file size from metadata before download
+            try:
+                metadata = self.aws_client.get_object_metadata(self.bucket, self.key)
+                self.file_size = metadata.get('content_length', 0)
+                
+                # Emit a special progress signal with file size information
+                size_status = f"{self.status} ({self.aws_client.format_size(self.file_size)})"
+                self.signals.progress.emit(self.operation_id, 0, size_status, 0.0)
+                logger.debug(f"[DOWNLOAD] Starting download with file_size: {self.file_size}")
+            except Exception as e:
+                logger.warning(f"Failed to get file size for {self.bucket}/{self.key}: {str(e)}")
+                self.file_size = 0
+            
+            self.start_time = time.time()
+            self.last_reported_time = self.start_time
+            
+            # Progress callback
+            def progress_callback(bytes_amount):
                 if self.is_cancelled():
                     return False
-                self.signals.progress.emit(progress, self.status)
+                
+                self.downloaded_bytes += bytes_amount
+                
+                # Calculate progress percentage
+                if self.file_size > 0:
+                    current_time = time.time()
+                    progress = min(99, int((self.downloaded_bytes * 100) / self.file_size))
+                    
+                    # Only emit if progress has changed or time threshold passed
+                    elapsed = current_time - self.last_reported_time
+                    if progress != self.last_progress_value and elapsed >= 0.2:
+                        self.last_progress_value = progress
+                        
+                        # Calculate average speed
+                        speed = 0.0
+                        total_elapsed = current_time - self.start_time
+                        if total_elapsed > 0:
+                            speed = self.downloaded_bytes / total_elapsed
+                        self.last_reported_time = current_time
+                        
+                        # Emit progress update (status string no longer includes percentage)
+                        status_msg = f"{self.status}"
+                        logger.debug(f"[DOWNLOAD] Emitting progress: {progress}% - Speed: {speed:.2f} B/s")
+                        self.signals.progress.emit(self.operation_id, progress, status_msg, speed)
+                
                 return True
             
             # Download the file
@@ -258,12 +363,9 @@ class DownloadWorker(BaseWorker):
             if self.is_cancelled() or not success:
                 return
             
-            # Get the file size for reporting
-            file_info = file_service.get_file_info(self.save_path)
-            file_size = file_info.get('size', 0)
-            
-            self.signals.progress.emit(100, self.status)
-            self.signals.success.emit(f"Downloaded {file_size} bytes to {os.path.basename(self.save_path)}")
+            # Ensure final progress is 100%, speed is irrelevant now
+            self.signals.progress.emit(self.operation_id, 100, f"{self.status} (100%)", 0.0)
+            self.signals.success.emit(f"Downloaded {self.file_size} bytes to {os.path.basename(self.save_path)}")
             self.signals.finished.emit()
             
         except Exception as e:
@@ -283,7 +385,7 @@ class DeleteWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(0, self.status)
+            self.signals.progress.emit(self.operation_id, 0, self.status, 0.0)
             
             # Delete the object
             self.aws_client.delete_object(self.bucket, self.key)
@@ -291,7 +393,7 @@ class DeleteWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(100, self.status)
+            self.signals.progress.emit(self.operation_id, 100, self.status, 0.0)
             self.signals.success.emit(f"Deleted {self.key} from {self.bucket}")
             self.signals.finished.emit()
             
@@ -318,13 +420,13 @@ class UploadDirectoryWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(0, f"Analyzing directory {self.dir_name}...")
+            self.signals.progress.emit(self.operation_id, 0, f"Analyzing directory {self.dir_name}...", 0.0)
             
             # First, scan the directory to get total size and file count
             self._scan_directory()
             
             if self.total_files == 0:
-                self.signals.progress.emit(100, f"No files found in {self.dir_name}")
+                self.signals.progress.emit(self.operation_id, 100, f"No files found in {self.dir_name}", 0.0)
                 self.signals.success.emit(f"No files found in {self.dir_name}")
                 self.signals.finished.emit()
                 return
@@ -341,7 +443,7 @@ class UploadDirectoryWorker(BaseWorker):
                 dir_key = f"{self.dir_name}/"
             
             # Start uploading files
-            self.signals.progress.emit(0, f"Uploading {self.total_files} files ({self._format_size(self.total_size)})...")
+            self.signals.progress.emit(self.operation_id, 0, f"Uploading {self.total_files} files ({self._format_size(self.total_size)})...", 0.0)
             
             # Use recursive function to upload files
             success = self._upload_directory_recursive(self.directory_path, dir_key)
@@ -349,7 +451,7 @@ class UploadDirectoryWorker(BaseWorker):
             if self.is_cancelled() or not success:
                 return
             
-            self.signals.progress.emit(100, self.status)
+            self.signals.progress.emit(self.operation_id, 100, self.status, 0.0)
             self.signals.success.emit(f"Uploaded {self.total_files} files ({self._format_size(self.total_size)}) to {self.bucket}/{dir_key}")
             self.signals.finished.emit()
             
@@ -407,8 +509,10 @@ class UploadDirectoryWorker(BaseWorker):
                     file_key = f"{s3_prefix}{item}"
                     
                     self.signals.progress.emit(
+                        self.operation_id,
                         int(self.uploaded_size * 100 / max(1, self.total_size)),
-                        f"Uploading {item} ({self._format_size(file_size)})..."
+                        f"Uploading {item} ({self._format_size(file_size)})...",
+                        0.0
                     )
                     
                     # Upload the file
@@ -424,8 +528,10 @@ class UploadDirectoryWorker(BaseWorker):
                         total_progress = int(total_uploaded * 100 / max(1, self.total_size))
                         
                         self.signals.progress.emit(
+                            self.operation_id,
                             total_progress,
-                            f"Uploading {item} ({progress}%)..."
+                            f"Uploading {item} ({progress}%)...",
+                            0.0
                         )
                         return True
                     
@@ -485,14 +591,14 @@ class DownloadDirectoryWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(0, f"Listing objects in {self.prefix}...")
+            self.signals.progress.emit(self.operation_id, 0, f"Listing objects in {self.prefix}...", 0.0)
             
             # First, list all objects with the prefix to get total size and count
             result = self.aws_client.list_objects(self.bucket, self.prefix, delimiter='')
             objects = result.get('objects', [])
             
             if not objects:
-                self.signals.progress.emit(100, f"No objects found in {self.prefix}")
+                self.signals.progress.emit(self.operation_id, 100, f"No objects found in {self.prefix}", 0.0)
                 self.signals.success.emit(f"No objects found in {self.prefix}")
                 self.signals.finished.emit()
                 return
@@ -512,7 +618,7 @@ class DownloadDirectoryWorker(BaseWorker):
             file_service.ensure_directory(target_dir)
             
             # Start downloading files
-            self.signals.progress.emit(0, f"Downloading {self.total_objects} files ({self._format_size(self.total_size)})...")
+            self.signals.progress.emit(self.operation_id, 0, f"Downloading {self.total_objects} files ({self._format_size(self.total_size)})...", 0.0)
             
             # Download each object
             for obj in objects:
@@ -539,8 +645,10 @@ class DownloadDirectoryWorker(BaseWorker):
                 file_service.ensure_directory(os.path.dirname(local_path))
                 
                 self.signals.progress.emit(
+                    self.operation_id,
                     int(self.downloaded_size * 100 / max(1, self.total_size)),
-                    f"Downloading {os.path.basename(key)} ({self._format_size(size)})..."
+                    f"Downloading {os.path.basename(key)} ({self._format_size(size)})...",
+                    0.0
                 )
                 
                 # Download the file
@@ -556,8 +664,10 @@ class DownloadDirectoryWorker(BaseWorker):
                     total_progress = int(total_downloaded * 100 / max(1, self.total_size))
                     
                     self.signals.progress.emit(
+                        self.operation_id,
                         total_progress,
-                        f"Downloading {os.path.basename(key)} ({progress}%)..."
+                        f"Downloading {os.path.basename(key)} ({progress}%)...",
+                        0.0
                     )
                     return True
                 
@@ -582,7 +692,7 @@ class DownloadDirectoryWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(100, self.status)
+            self.signals.progress.emit(self.operation_id, 100, self.status, 0.0)
             self.signals.success.emit(f"Downloaded {self.downloaded_objects} files ({self._format_size(self.downloaded_size)}) to {target_dir}")
             self.signals.finished.emit()
             
@@ -616,14 +726,14 @@ class DeleteDirectoryWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(0, f"Listing objects in {self.prefix}...")
+            self.signals.progress.emit(self.operation_id, 0, f"Listing objects in {self.prefix}...", 0.0)
             
             # First, list all objects with the prefix
             result = self.aws_client.list_objects(self.bucket, self.prefix, delimiter='')
             objects = result.get('objects', [])
             
             if not objects:
-                self.signals.progress.emit(100, f"No objects found in {self.prefix}")
+                self.signals.progress.emit(self.operation_id, 100, f"No objects found in {self.prefix}", 0.0)
                 self.signals.success.emit(f"No objects found in {self.prefix}")
                 self.signals.finished.emit()
                 return
@@ -634,7 +744,7 @@ class DeleteDirectoryWorker(BaseWorker):
                 return
             
             # Start deleting objects
-            self.signals.progress.emit(0, f"Deleting {self.total_objects} objects...")
+            self.signals.progress.emit(self.operation_id, 0, f"Deleting {self.total_objects} objects...", 0.0)
             
             # Delete objects in batches of up to 1000 (S3 limit)
             batch_size = 1000
@@ -656,7 +766,12 @@ class DeleteDirectoryWorker(BaseWorker):
                     # Update progress
                     self.deleted_objects += len(batch)
                     progress = int(self.deleted_objects * 100 / self.total_objects)
-                    self.signals.progress.emit(progress, f"Deleted {self.deleted_objects}/{self.total_objects} objects...")
+                    self.signals.progress.emit(
+                        self.operation_id,
+                        progress,
+                        f"Deleted {self.deleted_objects}/{self.total_objects} objects...",
+                        0.0
+                    )
                     
                 except Exception as e:
                     logger.error(f"Error deleting objects batch: {str(e)}")
@@ -666,7 +781,7 @@ class DeleteDirectoryWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(100, self.status)
+            self.signals.progress.emit(self.operation_id, 100, self.status, 0.0)
             self.signals.success.emit(f"Deleted {self.deleted_objects} objects from {self.bucket}/{self.prefix}")
             self.signals.finished.emit()
             
@@ -688,7 +803,7 @@ class GetObjectUrlWorker(BaseWorker):
             if self.is_cancelled():
                 return
             
-            self.signals.progress.emit(0, self.status)
+            self.signals.progress.emit(self.operation_id, 0, self.status, 0.0)
             
             # Generate the URL
             url = self.aws_client.get_object_url(self.bucket, self.key, self.expiration)
@@ -698,7 +813,7 @@ class GetObjectUrlWorker(BaseWorker):
             
             # Return the URL
             self.signals.data.emit(url)
-            self.signals.progress.emit(100, self.status)
+            self.signals.progress.emit(self.operation_id, 100, self.status, 0.0)
             self.signals.success.emit(f"Generated URL valid for {self.expiration} seconds")
             self.signals.finished.emit()
             

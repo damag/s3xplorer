@@ -804,23 +804,12 @@ class MainWindow(QMainWindow):
                 self.operations_window.complete_operation(operation_id)
                 break
     
-    def handle_worker_progress(self, progress: int, status: str):
-        """Handle progress updates from workers."""
+    def handle_worker_progress(self, operation_id: str, progress: int, status: str, speed: float):
+        """Handle progress updates from workers, including speed."""
         if self.operations_window:
-            # Find the operation by matching the status text
-            for operation_id, operation in self.operations_window.operations.items():
-                # For directory operations, the status includes the current file being processed
-                if operation['type'] in ["Upload Directory", "Download Directory", "List Directory", "List Objects"]:
-                    # Update progress and status
-                    self.operations_window.update_progress(operation_id, progress)
-                    status_item = self.operations_window.operations_table.item(operation['row'], 5)
-                    if status_item:
-                        status_item.setText(status)
-                else:
-                    # For single file operations, match the exact status
-                    if operation['status'] == status:
-                        self.operations_window.update_progress(operation_id, progress)
-                        break
+            # Directly update the operation with the given ID, passing the speed
+            if operation_id in self.operations_window.operations:
+                self.operations_window.update_progress(operation_id, progress, status, speed)
     
     def handle_operation_cancel(self, operation_id: str):
         """Handle cancellation of an operation."""
@@ -962,7 +951,7 @@ class MainWindow(QMainWindow):
             "Download", 
             f"Downloading {filename} from bucket: {self.current_bucket}",
             key,
-            0  # Size will be shown during download
+            None  # Get file size from metadata during download
         )
         worker = DownloadWorker(self.aws_client, self.current_bucket, key, save_path)
         
