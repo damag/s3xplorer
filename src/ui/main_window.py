@@ -368,11 +368,13 @@ class MainWindow(QMainWindow):
         # Create and start the worker
         operation_id = self.operations_window.add_operation(
             "List Objects", 
-            f"Listing objects in bucket: {bucket_name}"
+            f"Listing objects in bucket: {bucket_name}",
+            None,
+            None
         )
         worker = ListObjectsWorker(self.aws_client, bucket_name, signals)
         self.worker_manager.start_worker(worker, operation_id)
-        self.status_bar.showMessage(f"Loading objects in {bucket_name}...")
+        self.status_bar.showMessage("Loading objects in {bucket_name}...")
     
     def handle_objects_data(self, objects):
         """Handle the objects data from the worker."""
@@ -522,7 +524,7 @@ class MainWindow(QMainWindow):
         
         operation_id = self.operations_window.add_operation(
             "Upload", 
-            f"Uploading {key} to {self.current_bucket}",
+            f"Uploading {key} to bucket: {self.current_bucket}",
             file_path,
             os.path.getsize(file_path)
         )
@@ -608,7 +610,7 @@ class MainWindow(QMainWindow):
             
             operation_id = self.operations_window.add_operation(
                 "Download", 
-                f"Downloading {key} from {self.current_bucket}",
+                f"Downloading {key} from bucket: {self.current_bucket}",
                 save_path,
                 os.path.getsize(save_path) if os.path.exists(save_path) else None
             )
@@ -691,8 +693,10 @@ class MainWindow(QMainWindow):
         
         # Create and start the worker
         operation_id = self.operations_window.add_operation(
-            "Delete Directory", 
-            f"Deleting directory {prefix} from {self.current_bucket}"
+            "Delete", 
+            f"Deleting directory {prefix} from bucket: {self.current_bucket}",
+            None,
+            None
         )
         worker = DeleteDirectoryWorker(self.aws_client, self.current_bucket, prefix, signals)
         self.worker_manager.start_worker(worker, operation_id)
@@ -709,7 +713,9 @@ class MainWindow(QMainWindow):
         # Create and start the worker
         operation_id = self.operations_window.add_operation(
             "Delete", 
-            f"Deleting {key} from {self.current_bucket}"
+            f"Deleting {key} from bucket: {self.current_bucket}",
+            None,
+            None
         )
         worker = DeleteWorker(self.aws_client, self.current_bucket, key, signals)
         self.worker_manager.start_worker(worker, operation_id)
@@ -722,7 +728,7 @@ class MainWindow(QMainWindow):
         
         # Complete the Delete operation for this key
         for operation_id, operation in self.operations_window.operations.items():
-            if operation['type'] in ["Delete", "Delete Directory"]:
+            if operation['type'] == "Delete":
                 self.operations_window.complete_operation(operation_id)
                 break
     

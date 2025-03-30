@@ -28,19 +28,20 @@ class OperationsWindow(QWidget):
             "Operation", "File", "Size", "Speed", "Progress", "Status", ""
         ])
         self.operations_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.operations_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.operations_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.operations_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         self.operations_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self.operations_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.operations_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self.operations_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.operations_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
         
         # Set column widths
         self.operations_table.setColumnWidth(0, 100)  # Operation
+        self.operations_table.setColumnWidth(1, 200)  # File (reduced from stretch)
         self.operations_table.setColumnWidth(2, 100)  # Size
         self.operations_table.setColumnWidth(3, 100)  # Speed
         self.operations_table.setColumnWidth(4, 200)  # Progress
-        self.operations_table.setColumnWidth(5, 100)  # Status
+        self.operations_table.setColumnWidth(5, 300)  # Status (increased from 100)
         self.operations_table.setColumnWidth(6, 40)   # Cancel button
         
         self.operations_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -82,12 +83,12 @@ class OperationsWindow(QWidget):
         row = self.operations_table.rowCount()
         self.operations_table.insertRow(row)
         
-        # Operation name
+        # Operation name with bucket info if available
         name_item = QTableWidgetItem(operation_type)
         name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         self.operations_table.setItem(row, 0, name_item)
         
-        # File name
+        # File name with full path if available
         file_item = QTableWidgetItem(os.path.basename(file_path) if file_path else "")
         file_item.setFlags(file_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         self.operations_table.setItem(row, 1, file_item)
@@ -111,8 +112,8 @@ class OperationsWindow(QWidget):
         progress_bar.setFormat("%p%")
         self.operations_table.setCellWidget(row, 4, progress_bar)
         
-        # Status label
-        status_item = QTableWidgetItem("In Progress")
+        # Status label with bucket and object details
+        status_item = QTableWidgetItem(status)
         status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         self.operations_table.setItem(row, 5, status_item)
         
