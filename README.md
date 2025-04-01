@@ -120,8 +120,3 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- The AWS team for the boto3 library
-- The PyQt team for the Qt Python bindings
